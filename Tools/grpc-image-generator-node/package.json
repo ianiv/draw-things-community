@@ -1,0 +1,38 @@
+{
+  "name": "draw-things-grpc-cli",
+  "version": "1.0.0",
+  "description": "TypeScript CLI for generating images using the Draw Things gRPC API",
+  "main": "dist/index.js",
+  "bin": {
+    "draw-things": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/cli.ts",
+    "start": "node dist/cli.js",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "grpc",
+    "image-generation",
+    "draw-things",
+    "ai"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@grpc/grpc-js": "^1.9.0",
+    "@grpc/proto-loader": "^0.7.10",
+    "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "flatbuffers": "^23.5.26",
+    "js-yaml": "^4.1.0",
+    "sharp": "^0.33.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2"
+  }
+}
