@@ -5,6 +5,7 @@ A Python command-line tool for generating images using the Draw Things gRPC API.
 ## Features
 
 - 🎨 Generate images from text prompts
+- 📋 List available models, LoRAs, and ControlNets on the server
 - ⚙️ Configuration file support (YAML)
 - 🔧 Command-line parameter overrides
 - 📊 Real-time progress display
@@ -43,13 +44,19 @@ This creates a `config.yaml` file with default settings that you can customize.
 ./draw_things_cli.py generate "a beautiful sunset over mountains"
 ```
 
-### 3. Use Custom Configuration
+### 3. List Available Models
+
+```bash
+./draw_things_cli.py list-models
+```
+
+### 4. Use Custom Configuration
 
 ```bash
 ./draw_things_cli.py generate "cyberpunk city at night" -c config.yaml
 ```
 
-### 4. Override Configuration Settings
+### 5. Override Configuration Settings
 
 ```bash
 ./draw_things_cli.py generate "portrait of a woman" \
@@ -77,6 +84,50 @@ Example:
 ```bash
 ./draw_things_cli.py init-config -o my-config.yaml
 ```
+
+#### `list-models` - List Available Models
+
+Query the server to discover available models, LoRAs, ControlNets, and other resources.
+
+```bash
+./draw_things_cli.py list-models [OPTIONS]
+```
+
+**Optional Arguments:**
+
+*Server Connection:*
+- `-c, --config PATH`: Path to configuration file
+- `--host HOST`: Server hostname (default: localhost)
+- `--port PORT`: Server port (default: 50051)
+- `--secret SECRET`: Shared secret for authentication
+
+*Display Options:*
+- `-t, --type TYPE`: Filter by model type
+  - `models` - Stable Diffusion models
+  - `loras` - LoRA weights
+  - `controlnets` - ControlNet models
+  - `textual_inversions` - Textual inversions/embeddings
+  - `upscalers` - Upscaler models
+  - `files` - Raw .ckpt files
+- `-v, --verbose`: Show detailed information about each model
+
+**Examples:**
+
+```bash
+# List all available resources
+./draw_things_cli.py list-models
+
+# List only LoRAs
+./draw_things_cli.py list-models --type loras
+
+# List models with detailed information
+./draw_things_cli.py list-models --type models --verbose
+
+# Use config file for server settings
+./draw_things_cli.py list-models -c config.yaml
+```
+
+**Note:** Model browsing must be enabled on the server for this command to work. If the server doesn't have model browsing enabled, you'll see a warning message.
 
 #### `generate` - Generate Images
 
@@ -256,6 +307,25 @@ Available sampler types:
     --batch-size 2
 ```
 
+### Listing Models
+
+```bash
+# List all available models and resources
+./draw_things_cli.py list-models
+
+# List only models
+./draw_things_cli.py list-models --type models
+
+# List LoRAs with detailed information
+./draw_things_cli.py list-models --type loras --verbose
+
+# List ControlNets
+./draw_things_cli.py list-models --type controlnets
+
+# Connect to remote server
+./draw_things_cli.py list-models --host 192.168.1.100 --port 50051
+```
+
 ## Output
 
 Generated images are saved to the output directory (default: `./output/`) with filenames based on:
@@ -264,6 +334,49 @@ Generated images are saved to the output directory (default: `./output/`) with f
 - Image index
 
 Example filename: `beautiful_sunset_over_mountains_1702512345_0.png`
+
+## Model Discovery
+
+The `list-models` command queries the server to discover available resources. Example output:
+
+```
+Connecting to localhost:50051...
+✓ Connected: HELLO draw-things-cli-list
+
+📦 Models:
+================================================================================
+  • v1-5-pruned-emaonly.ckpt
+  • sd_xl_base_1.0.ckpt (Stable Diffusion XL 1.0 Base)
+  • dreamshaper_8.safetensors (DreamShaper 8)
+
+🎨 LoRAs:
+================================================================================
+  • add_detail.safetensors
+  • anime_style_v2.safetensors
+
+🎮 ControlNets:
+================================================================================
+  • control_v11p_sd15_canny.ckpt
+  • control_v11f1p_sd15_depth.pth
+
+⬆️  Upscalers:
+================================================================================
+  • RealESRGAN_x4plus.pth
+  • RealESRGAN_x4plus_anime_6B.pth
+```
+
+With `--verbose` flag, detailed information is shown:
+
+```
+📦 Models:
+================================================================================
+
+  📄 sd_xl_base_1.0.ckpt
+    Name: Stable Diffusion XL 1.0 Base
+    Model Version: SDXL
+    Resolution: 1024
+    Description: Base model for SDXL
+```
 
 ## Progress Display
 

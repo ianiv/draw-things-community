@@ -10,8 +10,9 @@ import os
 import time
 import yaml
 import grpc
+import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from PIL import Image
 import io
 import random
@@ -69,6 +70,155 @@ class ImageGenerator:
         """Close the gRPC channel."""
         if self.channel:
             self.channel.close()
+
+    def list_models(self, model_type: Optional[str] = None, verbose: bool = False) -> bool:
+        """
+        List available models on the server.
+
+        Args:
+            model_type: Filter by type (models, loras, controlnets, textual_inversions, upscalers)
+            verbose: Show detailed information
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.stub:
+            print("Error: Not connected to server")
+            return False
+
+        try:
+            echo_request = imageService_pb2.EchoRequest(
+                name="draw-things-cli-list",
+                sharedSecret=self.shared_secret if self.shared_secret else ""
+            )
+            response = self.stub.Echo(echo_request)
+
+            if response.sharedSecretMissing:
+                print("✗ Authentication required (shared secret)")
+                return False
+
+            # Check if model browsing is available
+            if not response.HasField('override'):
+                print("⚠ Server does not have model browsing enabled")
+                print("  The server may not be configured to share model information.")
+                return False
+
+            override = response.override
+            has_data = False
+
+            # Parse and display models
+            if (not model_type or model_type == 'models') and override.models:
+                try:
+                    models = json.loads(override.models)
+                    if models:
+                        has_data = True
+                        print("\n📦 Models:")
+                        print("=" * 80)
+                        self._print_specifications(models, verbose)
+                except json.JSONDecodeError:
+                    pass
+
+            # Parse and display LoRAs
+            if (not model_type or model_type == 'loras') and override.loras:
+                try:
+                    loras = json.loads(override.loras)
+                    if loras:
+                        has_data = True
+                        print("\n🎨 LoRAs:")
+                        print("=" * 80)
+                        self._print_specifications(loras, verbose)
+                except json.JSONDecodeError:
+                    pass
+
+            # Parse and display ControlNets
+            if (not model_type or model_type == 'controlnets') and override.controlNets:
+                try:
+                    controlnets = json.loads(override.controlNets)
+                    if controlnets:
+                        has_data = True
+                        print("\n🎮 ControlNets:")
+                        print("=" * 80)
+                        self._print_specifications(controlnets, verbose)
+                except json.JSONDecodeError:
+                    pass
+
+            # Parse and display Textual Inversions
+            if (not model_type or model_type == 'textual_inversions') and override.textualInversions:
+                try:
+                    textual_inversions = json.loads(override.textualInversions)
+                    if textual_inversions:
+                        has_data = True
+                        print("\n✏️  Textual Inversions:")
+                        print("=" * 80)
+                        self._print_specifications(textual_inversions, verbose)
+                except json.JSONDecodeError:
+                    pass
+
+            # Parse and display Upscalers
+            if (not model_type or model_type == 'upscalers') and override.upscalers:
+                try:
+                    upscalers = json.loads(override.upscalers)
+                    if upscalers:
+                        has_data = True
+                        print("\n⬆️  Upscalers:")
+                        print("=" * 80)
+                        self._print_specifications(upscalers, verbose)
+                except json.JSONDecodeError:
+                    pass
+
+            # Display raw .ckpt files if available
+            if (not model_type or model_type == 'files') and response.files:
+                has_data = True
+                print("\n📁 Raw Model Files (.ckpt):")
+                print("=" * 80)
+                for f in sorted(response.files):
+                    print(f"  • {f}")
+
+            if not has_data:
+                print("\n⚠ No models available on the server")
+                print("  The server may not have any models downloaded yet.")
+                return False
+
+            print()
+            return True
+
+        except grpc.RpcError as e:
+            print(f"✗ Failed to list models: {e.details()}")
+            return False
+
+    def _print_specifications(self, specs: List[Dict], verbose: bool):
+        """Print model specifications in a readable format."""
+        for spec in specs:
+            file = spec.get('file', 'Unknown')
+
+            if verbose:
+                # Detailed view
+                print(f"\n  📄 {file}")
+
+                # Show all available fields
+                for key, value in spec.items():
+                    if key == 'file':
+                        continue
+
+                    # Format the key nicely
+                    display_key = key.replace('_', ' ').title()
+
+                    # Format the value based on type
+                    if isinstance(value, dict):
+                        print(f"    {display_key}:")
+                        for k, v in value.items():
+                            print(f"      {k}: {v}")
+                    elif isinstance(value, list):
+                        print(f"    {display_key}: {', '.join(map(str, value))}")
+                    else:
+                        print(f"    {display_key}: {value}")
+            else:
+                # Simple view - just the filename and name if available
+                name = spec.get('name', spec.get('display_name', ''))
+                if name and name != file:
+                    print(f"  • {file} ({name})")
+                else:
+                    print(f"  • {file}")
 
     def generate_image(
         self,
@@ -367,6 +517,12 @@ Examples:
   # Create default config file
   %(prog)s init-config
 
+  # List available models and LoRAs
+  %(prog)s list-models
+
+  # List only LoRAs with details
+  %(prog)s list-models --type loras --verbose
+
   # Specify output directory
   %(prog)s generate "landscape" -o my_images/
         """
@@ -400,6 +556,18 @@ Examples:
     init_parser = subparsers.add_parser('init-config', help='Create default configuration file')
     init_parser.add_argument('-o', '--output', default='config.yaml',
                             help='Output path for config file (default: config.yaml)')
+
+    # List-models command
+    list_parser = subparsers.add_parser('list-models', help='List available models on the server')
+    list_parser.add_argument('-c', '--config', help='Path to configuration file')
+    list_parser.add_argument('--host', help='Server hostname')
+    list_parser.add_argument('--port', type=int, help='Server port')
+    list_parser.add_argument('--secret', help='Shared secret for authentication')
+    list_parser.add_argument('-t', '--type',
+                            choices=['models', 'loras', 'controlnets', 'textual_inversions', 'upscalers', 'files'],
+                            help='Filter by model type')
+    list_parser.add_argument('-v', '--verbose', action='store_true',
+                            help='Show detailed information')
 
     args = parser.parse_args()
 
@@ -465,6 +633,34 @@ Examples:
                 config=gen_config if gen_config else None,
                 output_dir=output_dir,
                 show_progress=show_progress
+            )
+            return 0 if success else 1
+        finally:
+            client.disconnect()
+
+    # Handle list-models command
+    if args.command == 'list-models':
+        # Load config file if provided
+        config_data = {}
+        if args.config:
+            config_data = load_config(args.config)
+
+        # Get server settings
+        server_config = config_data.get('server', {})
+        host = args.host or server_config.get('host', 'localhost')
+        port = args.port or server_config.get('port', 50051)
+        secret = args.secret or server_config.get('shared_secret')
+
+        # Create client and list models
+        client = ImageGenerator(host, port, secret)
+
+        if not client.connect():
+            return 1
+
+        try:
+            success = client.list_models(
+                model_type=args.type,
+                verbose=args.verbose
             )
             return 0 if success else 1
         finally:
