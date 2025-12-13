@@ -2,6 +2,10 @@
 
 This document describes the gRPC API exposed by the Draw Things gRPC server. The server implements two main services: **ImageGenerationService** for image generation operations and **ControlPanelService** for server management.
 
+## Quick Start
+
+Looking to generate images right away? Check out the **[Python CLI Tool](tools/grpc-image-generator/)** - a ready-to-use command-line client for the gRPC API.
+
 ## Table of Contents
 
 - [ImageGenerationService](#imagegenerationservice)
@@ -643,3 +647,25 @@ Generated Swift code:
 
 Server implementation:
 - `Libraries/GRPC/Server/Sources/ImageGenerationServiceImpl.swift`
+
+## Client Tools
+
+### Python CLI Tool
+
+A complete Python command-line client is available at [`tools/grpc-image-generator/`](tools/grpc-image-generator/). Features include:
+
+- Simple command-line interface for image generation
+- YAML configuration file support
+- Real-time progress display
+- Automatic image saving
+- Support for all generation parameters (LoRA, ControlNet, hi-res fix, etc.)
+
+**Quick example:**
+```bash
+cd tools/grpc-image-generator
+pip install -r requirements.txt
+./draw_things_cli.py init-config
+./draw_things_cli.py generate "a beautiful sunset over mountains"
+```
+
+See the [CLI tool README](tools/grpc-image-generator/README.md) for complete documentation.
