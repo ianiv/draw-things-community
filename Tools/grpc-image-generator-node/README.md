@@ -22,18 +22,31 @@ A modern TypeScript/Node.js command-line tool for generating images using the Dr
 
 ## Installation
 
+### Quick Install
+
 ```bash
 cd tools/grpc-image-generator-node
 npm install
 npm run build
+npm install -g .
 ```
+
+After installation, you can use `draw-things` from anywhere on your system:
+
+```bash
+draw-things init-config
+draw-things list-models
+draw-things generate "your prompt"
+```
+
+For detailed installation options, see [INSTALL.md](./INSTALL.md).
 
 ## Quick Start
 
 ### 1. Create a Default Configuration File
 
 ```bash
-npm start -- init-config
+draw-things init-config
 ```
 
 This creates a `config.yaml` file with default settings you can customize.
@@ -41,30 +54,42 @@ This creates a `config.yaml` file with default settings you can customize.
 ### 2. Generate Your First Image
 
 ```bash
-npm start -- generate "a beautiful sunset over mountains"
+draw-things generate "a beautiful sunset over mountains"
 ```
 
 ### 3. List Available Models
 
 ```bash
-npm start -- list-models
+draw-things list-models
 ```
 
 ### 4. Use Custom Configuration
 
 ```bash
-npm start -- generate "cyberpunk city at night" -c config.yaml
+draw-things generate "cyberpunk city at night" -c config.yaml
 ```
 
 ### 5. Override Configuration Settings
 
 ```bash
-npm start -- generate "portrait of a woman" \
+draw-things generate "portrait of a woman" \
   -c config.yaml \
   --steps 30 \
   --width 768 \
   --height 768 \
   --cfg 8.5
+```
+
+## Upgrade from Development
+
+If you previously used `npm start`, you can now just use `draw-things` directly:
+
+```bash
+# Old way (during development)
+npm start -- generate "test"
+
+# New way (after installation)
+draw-things generate "test"
 ```
 
 ## Usage
@@ -74,7 +99,7 @@ npm start -- generate "portrait of a woman" \
 #### `init-config` - Create Default Configuration
 
 ```bash
-npm start -- init-config [-o OUTPUT_PATH]
+draw-things init-config [-o OUTPUT_PATH]
 ```
 
 **Options:**
@@ -82,7 +107,7 @@ npm start -- init-config [-o OUTPUT_PATH]
 
 **Example:**
 ```bash
-npm start -- init-config -o my-config.yaml
+draw-things init-config -o my-config.yaml
 ```
 
 #### `list-models` - List Available Models
@@ -90,7 +115,7 @@ npm start -- init-config -o my-config.yaml
 Query the server to discover available models, LoRAs, ControlNets, and other resources.
 
 ```bash
-npm start -- list-models [OPTIONS]
+draw-things list-models [OPTIONS]
 ```
 
 **Options:**
@@ -110,22 +135,22 @@ npm start -- list-models [OPTIONS]
 **Examples:**
 ```bash
 # List all available resources
-npm start -- list-models
+draw-things list-models
 
 # List only LoRAs
-npm start -- list-models --type loras
+draw-things list-models --type loras
 
 # List models with detailed information
-npm start -- list-models --type models --verbose
+draw-things list-models --type models --verbose
 
 # Use config file for server settings
-npm start -- list-models -c config.yaml
+draw-things list-models -c config.yaml
 ```
 
 #### `generate` - Generate Images
 
 ```bash
-npm start -- generate <prompt> [OPTIONS]
+draw-things generate <prompt> [OPTIONS]
 ```
 
 **Arguments:**
@@ -151,29 +176,29 @@ npm start -- generate <prompt> [OPTIONS]
 **Examples:**
 ```bash
 # Simple generation with defaults
-npm start -- generate "a red rose"
+draw-things generate "a red rose"
 
 # With negative prompt
-npm start -- generate "beautiful landscape" \
+draw-things generate "beautiful landscape" \
   -n "blurry, low quality, distorted"
 
 # Specify output directory
-npm start -- generate "portrait" -o ./my_images/
+draw-things generate "portrait" -o ./my_images/
 
 # High resolution with more steps
-npm start -- generate "detailed fantasy castle" \
+draw-things generate "detailed fantasy castle" \
   --width 1024 \
   --height 1024 \
   --steps 50 \
   --cfg 9.0
 
 # Reproducible generation with seed
-npm start -- generate "sunset" \
+draw-things generate "sunset" \
   --seed 42 \
   --steps 30
 
 # Using a specific model
-npm start -- generate "realistic portrait" \
+draw-things generate "realistic portrait" \
   --model realisticVisionV51.ckpt \
   --steps 35 \
   --cfg 7.0
@@ -312,7 +337,7 @@ Available sampler types:
 
 **Solution:** Add the shared secret to your config file or use `--secret` flag:
 ```bash
-npm start -- generate "test" --secret "your-secret-here"
+draw-things generate "test" --secret "your-secret-here"
 ```
 
 ### Model Not Found

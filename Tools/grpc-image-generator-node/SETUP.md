@@ -26,26 +26,33 @@ node dist/cli.js --version
 
 ## Running Commands
 
-After building, you can run commands in two ways:
+### After Global Installation (Recommended)
 
-### Via npm start (recommended during development)
+```bash
+draw-things init-config
+draw-things list-models
+draw-things generate "test prompt"
+```
 
+See [INSTALL.md](./INSTALL.md) for installation instructions.
+
+### During Development
+
+Via npm start:
 ```bash
 npm start -- init-config
 npm start -- list-models
 npm start -- generate "test prompt"
 ```
 
-### Via compiled JavaScript (after build)
-
+Via compiled JavaScript:
 ```bash
 node dist/cli.js init-config
 node dist/cli.js list-models
 node dist/cli.js generate "test prompt"
 ```
 
-### Via ts-node (development)
-
+Via ts-node (fastest for development):
 ```bash
 npm run dev -- init-config
 npm run dev -- list-models
