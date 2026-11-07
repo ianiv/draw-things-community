@@ -222,6 +222,14 @@ public final class ModelImporter {
     if isIdeogram4 {
       isZImage = false
     }
+    // Fibo 2.0 is a Z-Image derivative with a Perceiver over the text encoder.
+    var isFibo2 = stateDict.keys.contains {
+      $0.contains("perceiver.latent_queries")
+    }
+    if isFibo2 {
+      isZImage = false
+      isIdeogram4 = false
+    }
     var isKrea2 =
       stateDict.keys.contains {
         $0.contains("blocks.27.attn.wq.weight")
@@ -329,6 +337,7 @@ public final class ModelImporter {
       isQwenImage2_1 = false
       isMOSSImage = false
       isMiniMaxH3 = false
+      isFibo2 = false
     } else if isWurstchenStageC {
       modelVersion = .wurstchenStageC
       modifier = .none
@@ -439,6 +448,13 @@ public final class ModelImporter {
       isDiffusersFormat = stateDict.keys.contains {
         $0.contains("single_transformer_blocks.31.attn.")
       }
+    } else if isFibo2 {
+      modelVersion = .fibo2
+      modifier = .kontext
+      inputDim = 32
+      // 478 + 305 tensors across the two diffusers shards.
+      expectedTotalAccess = 783
+      isDiffusersFormat = true
     } else if isZImage {
       modelVersion = .zImage
       modifier = .none
@@ -602,7 +618,7 @@ public final class ModelImporter {
         throw Error.noTextEncoder
       case .zImage:
         throw Error.noTextEncoder
-      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage:
+      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
         throw Error.noTextEncoder
       case .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3:
         throw Error.noTextEncoder
@@ -681,7 +697,7 @@ public final class ModelImporter {
             .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1,
             .qwenImage2_1, .qwenImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b, .zImage,
             .ernieImage, .flux2,
-            .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
+            .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
             .ideogram4,
             .krea2:
             fatalError()
@@ -727,7 +743,7 @@ public final class ModelImporter {
               .wurstchenStageC, .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
               .hiDreamI1, .hiDreamO1, .qwenImage2_1, .qwenImage, .cosmos2_5_2b,
               .cosmos2_5_2_9b, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b,
-              .flux3_5b, .mossImage, .ltx2, .ltx2_3,
+              .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3,
               .seedvr2_3b,
               .seedvr2_7b,
               .ideogram4, .krea2:
@@ -905,6 +921,9 @@ public final class ModelImporter {
     case .flux3_5b:
       conditionalLength = 20480
       batchSize = 1
+    case .fibo2:
+      conditionalLength = Fibo2TextBundles * Fibo2TextBundleChannels
+      batchSize = 1
     case .ideogram4:
       conditionalLength = 13 * 4_096
       batchSize = 1
@@ -997,7 +1016,7 @@ public final class ModelImporter {
         case .wurstchenStageC, .wurstchenStageB, .pixart, .sd3, .sd3Large, .auraflow, .flux1,
           .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage2_1, .qwenImage,
           .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b,
-          .flux2_4b, .flux3_5b,
+          .flux2_4b, .flux3_5b, .fibo2,
           .mossImage,
           .ltx2,
           .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
@@ -1204,6 +1223,9 @@ public final class ModelImporter {
           ).map {
             graph.variable(.CPU, format: .NHWC, shape: $0, of: FloatType.self)
           }
+      case .fibo2:
+        // The conditions mix FP16 and FP32, they are built when compiling.
+        cArr = []
       case .flux3_5b:
         cArr =
           [
@@ -1536,6 +1558,16 @@ public final class ModelImporter {
           timesteps: 1,
           channels: 3072, layers: (5, 20), numberOfReferenceImages: 0, guidanceEmbed: true,
           usesFlashAttention: .scale1, kvCache: false)
+      case .fibo2:
+        // Build with an image to edit so the context path is mapped too.
+        (unetMapper, unet) = Fibo2(
+          batchSize: 1, height: 64, width: 64, textLength: 32, gistCount: 256,
+          referenceSequenceLength: 256, channels: Fibo2Channels, layers: Fibo2Layers,
+          injectionLayers: Fibo2InjectionLayers, usesFlashAttention: .scale1)
+        (unetFixedMapper, unetFixed) = Fibo2Fixed(
+          FloatType.self, timesteps: 1, textLength: 32, gistCount: 256,
+          referenceSizes: [(height: 32, width: 32)], channels: Fibo2Channels, layers: Fibo2Layers,
+          injectionLayers: Fibo2InjectionLayers, usesFlashAttention: .scale1)
       case .flux3_5b:
         // Build with a reference image so the reference embedder, refiner and modulations are imported.
         (unetMapper, unet) = Flux3(
@@ -1743,6 +1775,14 @@ public final class ModelImporter {
           graph.variable(.CPU, .HWC(1, 512, 7680), of: FloatType.self),
           graph.variable(.CPU, .WC(1, 256), of: FloatType.self),
           graph.variable(.CPU, .WC(1, 256), of: FloatType.self),
+        ]
+        tEmb = nil
+      case .fibo2:
+        crossattn = [
+          graph.variable(
+            .CPU, .HWC(1, 32, Fibo2TextBundles * Fibo2TextBundleChannels), of: FloatType.self),
+          graph.variable(.CPU, .WC(2, 256), of: FloatType.self),
+          graph.variable(.CPU, .NHWC(1, 32, 32, 32), of: FloatType.self),
         ]
         tEmb = nil
       case .flux3_5b:
@@ -2058,6 +2098,32 @@ public final class ModelImporter {
                 numberOfHeads: q.numberOfHeads, headDimension: q.headDimension)
             }
             UNetMapping = mapping
+            UNetMappingFixed = unetFixedMapper(.diffusers)
+            modelPrefix = "dit"
+            modelPrefixFixed = "dit"
+          case .fibo2:
+            // Gates, modulations and the final scale are FP32, the rest FP16.
+            var inputs: [DynamicGraph.AnyTensor] = [
+              xTensor,
+              graph.variable(
+                Tensor<FloatType>(
+                  from: Fibo2RotaryPositionEmbedding(
+                    height: 32, width: 32, gistCount: 256,
+                    referenceSizes: [(height: 16, width: 16)]))),
+            ]
+            for shape in Fibo2FixedOutputShapes(
+              timesteps: 1, textLength: 32, gistCount: 256, referenceSequenceLength: 256,
+              channels: Fibo2Channels, layers: Fibo2Layers, injectionLayers: Fibo2InjectionLayers)
+            {
+              if shape.count == 3 && shape[1] == 1 {
+                inputs.append(graph.variable(.CPU, format: .NHWC, shape: shape, of: Float.self))
+              } else {
+                inputs.append(graph.variable(.CPU, format: .NHWC, shape: shape, of: FloatType.self))
+              }
+            }
+            unet.compile(inputs: inputs)
+            unetFixed.compile(inputs: crossattn)
+            UNetMapping = unetMapper(.diffusers)
             UNetMappingFixed = unetFixedMapper(.diffusers)
             modelPrefix = "dit"
             modelPrefixFixed = "dit"
@@ -2463,6 +2529,9 @@ public final class ModelImporter {
           if $0.keys.count != 292 && $0.keys.count != 294 {
             throw Error.tensorWritesFailed
           }
+        case .fibo2:
+          // TODO: pin the written key count after the first import.
+          break
         case .flux3_5b:
           // The base model doesn't have the next timestep embedder.
           if $0.keys.count != 415 && $0.keys.count != 413 {
@@ -2759,6 +2828,9 @@ extension ModelImporter {
       textEncoder = fileNames.first {
         $0.hasSuffix("_qwen_3_vl_4b_instruct_f16.ckpt")
       }
+    case .fibo2:
+      // Converted on its own (ModelConverter --fibo2-text-encoder), it has the vision tower too.
+      textEncoder = nil
     case .ltx2, .ltx2_3:
       textEncoder = fileNames.first {
         $0.hasSuffix("_gemma_3_12b_it_qat_q8p.ckpt")
@@ -3131,6 +3203,18 @@ extension ModelImporter {
       }
       // For FLUX.2, the hires fix trigger scale is 2 of the finetune scale.
       specification.hiresFixScale = finetuneScale * 2
+    case .fibo2:
+      if specification.textEncoder == nil {
+        specification.textEncoder = "fibo_2_qwen_3_vl_4b_f16.ckpt"
+      }
+      if specification.autoencoder == nil {
+        specification.autoencoder = "flux_2_vae_f16.ckpt"
+      }
+      specification.highPrecisionAutoencoder = true
+      specification.objective = .u(conditionScale: 1000)
+      specification.noiseDiscretization = .rf(
+        .init(sigmaMin: 0, sigmaMax: 1, conditionScale: 1_000))
+      specification.hiresFixScale = (finetuneScale * 3 + 1) / 2
     case .flux3_5b:
       if specification.textEncoder == nil {
         specification.textEncoder = "qwen_3_vl_4b_instruct_i8x_trailer.ckpt"

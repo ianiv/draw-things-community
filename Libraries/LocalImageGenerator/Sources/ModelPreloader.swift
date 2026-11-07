@@ -550,7 +550,7 @@ extension ModelPreloader {
       .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage,
       .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b, .zImage, .ernieImage, .flux2,
       .flux2_9b, .flux2_4b,
-      .flux3_5b, .mossImage,
+      .flux3_5b, .fibo2, .mossImage,
       .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5,
       .minimaxH3:
       fatalError()
@@ -783,7 +783,7 @@ extension ModelPreloader {
           .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1,
           .qwenImage, .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b, .zImage,
           .ernieImage, .flux2,
-          .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
+          .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
           .ideogram4,
           .krea2,
           .longcatVideoAvatar1_5, .minimaxH3:
@@ -827,7 +827,7 @@ extension ModelPreloader {
                     .wurstchenStageC, .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
                     .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .cosmos2_5_2b,
                     .cosmos2_5_2_9b, .wan22_5b,
-                    .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage,
+                    .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
                     .ltx2, .ltx2_3,
                     .seedvr2_3b,
                     .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
@@ -875,7 +875,7 @@ extension ModelPreloader {
                   .wurstchenStageC, .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
                   .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .cosmos2_5_2b,
                   .cosmos2_5_2_9b, .wan22_5b,
-                  .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ltx2,
+                  .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2,
                   .ltx2_3,
                   .seedvr2_3b,
                   .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
@@ -1185,7 +1185,7 @@ extension ModelPreloader {
             .wurstchenStageB, .wurstchenStageC, .svdI2v, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
             .hiDreamI1, .qwenImage, .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b,
             .wan22_5b, .zImage, .ernieImage,
-            .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b,
+            .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b,
             .seedvr2_7b,
             .ideogram4,
             .krea2, .longcatVideoAvatar1_5:
@@ -1429,7 +1429,7 @@ extension ModelPreloader {
     case .auraflow, .flux1, .hiDreamI1, .hiDreamO1, .hunyuanVideo, .sd3, .sd3Large, .wan21_14b,
       .wan21_1_3b, .qwenImage, .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b,
       .zImage, .ernieImage,
-      .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
+      .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
       .ideogram4,
       .krea2,
       .longcatVideoAvatar1_5, .minimaxH3:

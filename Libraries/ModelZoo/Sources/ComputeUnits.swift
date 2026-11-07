@@ -95,7 +95,7 @@ public enum ComputeUnits {
     switch context.modelVersion {
     case .v1, .v2, .kandinsky21, .sdxlBase, .sdxlRefiner, .ssd1b, .wurstchenStageC,
       .wurstchenStageB, .sd3, .pixart, .auraflow, .sd3Large, .flux1, .qwenImage, .qwenImage2_1,
-      .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b,
+      .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b,
       .cosmos2_5_2_9b,
       .hiDreamI1,
       .hiDreamO1,
@@ -144,7 +144,7 @@ public enum ComputeUnits {
       return 512
     case .hunyuanVideo:
       return 256
-    case .qwenImage, .qwenImage2_1, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+    case .qwenImage, .qwenImage2_1, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
       .mossImage,
       .ideogram4:
       return 512
@@ -508,6 +508,16 @@ public enum ComputeUnits {
       // The text refiner runs on every prompt packed together.
       let fixedCount = MOSSImageFixedInstructionCount(
         batchSize: 1, tokenLength: baseTokenLength * cfgChannels, timesteps: 1, channels: 3_072)
+      return (main: mainCount * batchSize, fixed: fixedCount * batchSize)
+    case .fibo2:
+      // Close to Z-Image: gist and context tokens lead the stream instead of text.
+      let mainCount = ZImageInstructionCount(
+        batchSize: 1, height: startHeight, width: startWidth,
+        textLength: Fibo2GistCount(textLength: baseTokenLength) + referenceSequenceLength,
+        channels: 3584, layers: 44)
+      let fixedCount = ZImageFixedInstructionCount(
+        batchSize: 1, timesteps: 1, tokenLength: (0, baseTokenLength), channels: 3584, layers: 44,
+        textInputChannels: 7680)
       return (main: mainCount * batchSize, fixed: fixedCount * batchSize)
     case .flux3_5b:
       let mainCount = Flux3InstructionCount(

@@ -173,7 +173,7 @@ extension LocalImageGenerator {
       ]
     case .sd3, .sd3Large, .pixart, .auraflow, .flux1, .kandinsky21, .wurstchenStageB,
       .wurstchenStageC, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage,
-      .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+      .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
       .mossImage,
       .cosmos2_5_2b, .cosmos2_5_2_9b,
       .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5,
@@ -1796,6 +1796,19 @@ extension LocalImageGenerator {
         graph: graph, tokenizer: tokenizerQwen3, text: promptWithTemplate,
         negativeText: negativePromptWithTemplate,
         paddingToken: nil, addSpecialTokens: false, conditionalLength: 20480, modifier: .qwen3,
+        potentials: potentials, startLength: 0, endLength: 0, maxLength: 0, paddingLength: 0)
+    case .fibo2:
+      // Images to edit are passed with the kontext modifier: the canvas, then the shuffles.
+      let imageCount = (modifier == .kontext || modifier == .kontextKv) ? images : 0
+      let promptWithTemplate =
+        "<|im_start|>user\n\(Fibo2Prompt(text, images: imageCount))<|im_end|>\n<|im_start|>assistant\n"
+      let negativePromptWithTemplate =
+        "<|im_start|>user\n\(Fibo2Prompt(negativeText, images: imageCount))<|im_end|>\n<|im_start|>assistant\n"
+      return tokenize(
+        graph: graph, tokenizer: tokenizerQwen3, text: promptWithTemplate,
+        negativeText: negativePromptWithTemplate,
+        paddingToken: nil, addSpecialTokens: false,
+        conditionalLength: Fibo2TextBundles * Fibo2TextBundleChannels, modifier: .qwen3,
         potentials: potentials, startLength: 0, endLength: 0, maxLength: 0, paddingLength: 0)
     case .mossImage:
       // The Qwen 3.5 chat template trims the content and enables thinking.
@@ -3428,7 +3441,7 @@ extension LocalImageGenerator {
         fatalError()
       case .zImage, .ernieImage:
         fatalError()
-      case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage:
+      case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
         fatalError()
       case .ltx2, .ltx2_3:
         fatalError()
@@ -3528,7 +3541,7 @@ extension LocalImageGenerator {
         fatalError()
       case .zImage, .ernieImage:
         fatalError()
-      case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage:
+      case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
         fatalError()
       case .wan21_1_3b, .wan21_14b, .wan22_5b, .longcatVideoAvatar1_5:
         fatalError()
@@ -3547,7 +3560,7 @@ extension LocalImageGenerator {
         .ssd1b, .svdI2v, .wurstchenStageB, .wurstchenStageC, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
         .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .cosmos2_5_2b,
         .cosmos2_5_2_9b, .wan22_5b, .zImage,
-        .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ltx2, .ltx2_3,
+        .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3,
         .seedvr2_3b,
         .seedvr2_7b,
         .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
@@ -3616,10 +3629,10 @@ extension LocalImageGenerator {
             moments[0..<1, 0..<moments.shape[1], 0..<moments.shape[2], 0..<64].copied())
         }
         return (nil, encoded)
-      case .flux1, .qwenImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b:
+      case .flux1, .qwenImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2:
         let inputChannels =
           (version == .flux2 || version == .flux2_9b || version == .flux2_4b
-            || version == .flux3_5b) ? 32 : 16
+            || version == .flux3_5b || version == .fibo2) ? 32 : 16
         var referenceEncoded = [DynamicGraph.Tensor<FloatType>]()
         if let image = image {
           let encoded = firstStage.encode(image, encoder: nil, cancellation: { _ in }).0
@@ -3704,7 +3717,7 @@ extension LocalImageGenerator {
       case .v1, .v2, .auraflow, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .svdI2v, .wurstchenStageC, .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
         .hiDreamI1, .hiDreamO1, .wan22_5b, .zImage, .ernieImage, .flux1, .qwenImage, .qwenImage2_1,
-        .cosmos2_5_2b, .cosmos2_5_2_9b, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+        .cosmos2_5_2b, .cosmos2_5_2_9b, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
         .mossImage, .seedvr2_3b,
         .seedvr2_7b,
         .ideogram4, .krea2,
@@ -3729,7 +3742,7 @@ extension LocalImageGenerator {
       .ssd1b, .wurstchenStageB, .wurstchenStageC, .flux1, .hiDreamI1, .hiDreamO1, .qwenImage,
       .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b, .zImage, .ernieImage, .flux2,
       .flux2_9b, .flux2_4b,
-      .flux3_5b, .mossImage,
+      .flux3_5b, .fibo2, .mossImage,
       .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3:
       return false
     case .svdI2v:
@@ -3748,7 +3761,7 @@ extension LocalImageGenerator {
       .ssd1b, .svdI2v, .wurstchenStageB, .wurstchenStageC, .hunyuanVideo, .flux1, .hiDreamI1,
       .hiDreamO1, .qwenImage, .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b,
       .zImage, .ernieImage, .flux2,
-      .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
+      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
       return (1, image, nil)
     case .ltx2, .ltx2_3, .minimaxH3:
       guard forSample else {
@@ -3852,7 +3865,7 @@ extension LocalImageGenerator {
       .cosmos2_5_2b, .cosmos2_5_2_9b, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase,
       .sdxlRefiner, .ssd1b,
       .svdI2v, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .zImage, .ernieImage, .flux2,
-      .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
+      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
       .ideogram4, .krea2,
       .minimaxH3:
       return (batchSize, 0)
@@ -3935,7 +3948,7 @@ extension LocalImageGenerator {
       result[0..<shape[0], 0..<shape[1], 0..<shape[2], shape[3]..<(shape[3] + 64)] =
         imageShuffledMask
       return result
-    case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage:
+    case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
       fatalError()
     case .ltx2, .ltx2_3, .minimaxH3:
       fatalError()
@@ -4357,7 +4370,7 @@ extension LocalImageGenerator {
             ? Int(configuration.hiresFixStartHeight) : Int(configuration.startHeight))
           * 8
         firstPassAudioHeight = 0
-      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ideogram4:
+      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ideogram4:
         firstPassChannels = 32
         firstPassScaleFactor = 8
         firstPassStartWidth =
@@ -4610,7 +4623,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break
@@ -5184,7 +5197,7 @@ extension LocalImageGenerator {
           channels = 16
         case .hiDreamO1:
           channels = 3 * 32 * 32
-        case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ideogram4:
+        case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ideogram4:
           channels = 32
         case .wan22_5b:
           channels = 48
@@ -5746,7 +5759,7 @@ extension LocalImageGenerator {
         startWidth = image.shape[2] / 8 / imageScaleFactor
         startHeight = image.shape[1] / 8 / imageScaleFactor
         audioHeight = 0
-      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ideogram4:
+      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ideogram4:
         channels = 32
         startScaleFactor = 8
         startWidth = image.shape[2] / 8 / imageScaleFactor
@@ -5973,7 +5986,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break
@@ -7151,7 +7164,7 @@ extension LocalImageGenerator {
         startWidth = image.shape[2] / 8 / imageScaleFactor
         startHeight = image.shape[1] / 8 / imageScaleFactor
         audioHeight = 0
-      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ideogram4:
+      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ideogram4:
         channels = 32
         startScaleFactor = 8
         startWidth = image.shape[2] / 8 / imageScaleFactor
@@ -7455,7 +7468,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break
@@ -8111,7 +8124,7 @@ extension LocalImageGenerator {
         startWidth = image.shape[2] / 8 / imageScaleFactor
         startHeight = image.shape[1] / 8 / imageScaleFactor
         audioHeight = 0
-      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .ideogram4:
+      case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ideogram4:
         channels = 32
         startScaleFactor = 8
         startWidth = image.shape[2] / 8 / imageScaleFactor
@@ -8414,7 +8427,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break
