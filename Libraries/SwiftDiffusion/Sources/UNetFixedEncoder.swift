@@ -57,7 +57,7 @@ extension UNetFixedEncoder {
     case .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v, .sd3, .sd3Large, .pixart, .auraflow, .flux1,
       .wurstchenStageC, .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1,
       .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b,
-      .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2, .ltx2_3,
+      .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2, .ltx2_3,
       .seedvr2_3b, .seedvr2_7b,
       .ideogram4,
       .krea2,
@@ -205,7 +205,7 @@ extension UNetFixedEncoder {
       return []
     case .sd3, .sd3Large, .pixart, .auraflow, .flux1, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
       .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2,
-      .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
+      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
       .ltx2_3, .seedvr2_3b,
       .seedvr2_7b,
       .ideogram4,
@@ -1256,7 +1256,7 @@ extension UNetFixedEncoder {
       case .v1, .v2, .auraflow, .flux1, .kandinsky21, .pixart, .sdxlBase, .sdxlRefiner, .ssd1b,
         .svdI2v, .wurstchenStageB, .wurstchenStageC, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
         .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
         .ltx2_3, .seedvr2_3b,
         .seedvr2_7b,
         .ideogram4,
@@ -3078,6 +3078,54 @@ extension UNetFixedEncoder {
           height: startHeight / 2, width: startWidth / 2, tokenLengths: tokenLengths)
       ).toGPU(0)
       return ([graph.variable(rotaryEmbedding), text] + conditions.dropFirst(), nil)
+    case .fibo2:
+      // Text bundles from Qwen3-VL, [1, T, 6 * 7680].
+      let c0 = textEncoding[0]
+      let textLength = c0.shape[1]
+      let gistCount = Fibo2GistCount(textLength: textLength)
+      let h = startHeight / 2
+      let w = startWidth / 2
+      precondition(timesteps.count > 0)
+      // One row per step, then t = 0 for the gist and context tokens. Timesteps are sigma * 1000.
+      var timeEmbeds = graph.variable(.GPU(0), .WC(timesteps.count + 1, 256), of: FloatType.self)
+      for i in 0..<(timesteps.count + 1) {
+        let timeEmbed = graph.variable(
+          Tensor<FloatType>(
+            from: timeEmbedding(
+              timestep: i < timesteps.count ? timesteps[i] : 0, batchSize: 1, embeddingSize: 256,
+              maxPeriod: 10_000)
+          ).toGPU(0))
+        timeEmbeds[i..<(i + 1), 0..<256] = timeEmbed
+      }
+      let referenceSizes = referenceImages.map {
+        let shape = $0.shape
+        return (height: shape[1], width: shape[2])
+      }
+      let (_, unetFixed) = Fibo2Fixed(
+        FloatType.self, timesteps: timesteps.count, textLength: textLength, gistCount: gistCount,
+        referenceSizes: referenceSizes, channels: Fibo2Channels, layers: Fibo2Layers,
+        injectionLayers: Fibo2InjectionLayers,
+        usesFlashAttention: valueOr(usesFlashAttention, .scale1))
+      unetFixed.maxConcurrency = .limit(4)
+      unetFixed.compile(inputs: [c0, timeEmbeds] + referenceImages)
+      let loadedFromWeightsCache = weightsCache.detach(
+        "\(filePath):[fixed]", to: unetFixed.parameters)
+      if !loadedFromWeightsCache {
+        graph.openStore(
+          filePath, flags: .readOnly, externalStore: TensorData.externalStore(filePath: filePath)
+        ) { store in
+          store.read("dit", model: unetFixed, codec: [.jit, .q6p, .q8p, .i8x, .ezm7, externalData])
+        }
+      }
+      let conditions: [DynamicGraph.AnyTensor] = unetFixed(
+        inputs: c0, [timeEmbeds] + referenceImages)
+      weightsCache.attach("\(filePath):[fixed]", from: unetFixed.parameters)
+      let rotaryEmbedding = Tensor<FloatType>(
+        from: Fibo2RotaryPositionEmbedding(
+          height: h, width: w, gistCount: gistCount,
+          referenceSizes: referenceSizes.map { (height: $0.height / 2, width: $0.width / 2) })
+      ).toGPU(0)
+      return ([graph.variable(rotaryEmbedding)] + conditions, nil)
     case .flux3_5b:
       let c0 = textEncoding[0]
       let cBatchSize = c0.shape[0]

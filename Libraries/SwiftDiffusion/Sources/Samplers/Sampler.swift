@@ -30,6 +30,7 @@ public enum ModelVersion: String, Codable {
   case flux2_9b = "flux2_9b"
   case flux2_4b = "flux2_4b"
   case flux3_5b = "flux3_5b"
+  case fibo2 = "fibo2"
   case cosmos2_5_2b = "cosmos2.5_2b"
   case cosmos2_5_2_9b = "cosmos2.5_2.9b"
   case ideogram4 = "ideogram_4"
@@ -383,6 +384,10 @@ public func isCfgEnabled(
   guard version != .svdI2v else {
     return (textGuidanceScale - 1).magnitude > 1e-3 || (startFrameCfg - 1).magnitude > 1e-3
   }
+  guard version != .fibo2 else {
+    // Only Fibo 2.0 Edit Turbo (distilled, no classifier-free guidance) is wired.
+    return false
+  }
   guard version != .longcatVideoAvatar1_5 else {
     // Only the distilled no-CFG path is wired; the triple-guidance base path is not implemented.
     return false
@@ -545,7 +550,7 @@ func isBatchEnabled(_ version: ModelVersion) -> Bool {
     .krea2:
     return true
   case .hunyuanVideo, .svdI2v, .wan21_14b, .wan21_1_3b, .wan22_5b, .ltx2, .ltx2_3, .seedvr2_3b,
-    .seedvr2_7b, .longcatVideoAvatar1_5, .minimaxH3:
+    .seedvr2_7b, .longcatVideoAvatar1_5, .minimaxH3, .fibo2:
     return false
   }
 }

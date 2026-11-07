@@ -132,7 +132,7 @@ extension UNetProtocol {
         .toGPU(0))
     case .sd3, .pixart, .auraflow, .flux1, .sd3Large, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
       .hiDreamI1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b,
-      .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ideogram4, .krea2,
+      .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ideogram4, .krea2,
       .ltx2, .ltx2_3,
       .longcatVideoAvatar1_5,
       .minimaxH3:
@@ -414,6 +414,17 @@ public func UNetExtractConditions<FloatType: TensorNumeric & BinaryFloatingPoint
           index..<(index + 1), 0..<shape[1], 0..<shape[2]
         ].copied()
       }
+  case .fibo2:
+    // Only the noisy chunks and the final scale depend on the timestep.
+    let count = conditions.count
+    let noisyCount = Fibo2NoisyConditionCount(layers: Fibo2Layers)
+    return conditions[0..<(count - noisyCount)]
+      + conditions[(count - noisyCount)..<count].map {
+        let shape = $0.shape
+        return DynamicGraph.Tensor<Float>($0)[
+          index..<(index + 1), 0..<shape[1], 0..<shape[2]
+        ].copied()
+      }
   case .flux3_5b:
     let endIndex = referenceImageCount > 0 ? 3 : 2
     return conditions[0..<endIndex]
@@ -667,7 +678,7 @@ public func externalOnDemandPartially(
     case .v1, .v2, .kandinsky21, .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageC,
       .wurstchenStageB, .sd3, .pixart, .auraflow, .wan21_1_3b, .wan22_5b, .flux1, .sd3Large,
       .hunyuanVideo, .hiDreamI1, .hiDreamO1, .wan21_14b, .qwenImage, .qwenImage2_1, .zImage,
-      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b,
+      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b,
       .cosmos2_5_2_9b, .ltx2,
       .ltx2_3,
       .seedvr2_3b,
@@ -682,7 +693,7 @@ public func externalOnDemandPartially(
       .wurstchenStageB, .sd3, .pixart, .auraflow, .wan21_1_3b, .wan22_5b:
       return false
     case .flux1, .sd3Large, .hunyuanVideo, .hiDreamI1, .hiDreamO1, .wan21_14b, .qwenImage,
-      .qwenImage2_1, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage,
+      .qwenImage2_1, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
       .cosmos2_5_2b, .cosmos2_5_2_9b,
       .ltx2,
       .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
@@ -1962,6 +1973,32 @@ extension UNetFromNNC {
             usesFlashAttention: valueOr(useFlashAttention, .scale1)
           ).1
         })
+    case .fibo2:
+      tiledWidth =
+        tiledDiffusion.isEnabled ? min(tiledDiffusion.tileSize.width * 8, startWidth) : startWidth
+      tiledHeight =
+        tiledDiffusion.isEnabled
+        ? min(tiledDiffusion.tileSize.height * 8, startHeight) : startHeight
+      tiledAudioHeight = 0
+      tileScaleFactor = 8
+      // LoRA is not supported for Fibo 2.0 yet.
+      didRunLoRASeparately = false
+      unet = ModelBuilderOrModel.modelBuilder(
+        ModelBuilder { _, inputs in
+          // Inputs: x, rot, gist, (keys, values) per injection block, gates, context latents.
+          let gistCount = inputs[2].shape[1]
+          let textLength = inputs[3].shape[1]
+          let referenceIndex = 3 + Fibo2InjectionLayers.count * 3
+          let referenceSequenceLength =
+            referenceImageCount > 0 ? inputs[referenceIndex].shape[1] : 0
+          return Fibo2(
+            batchSize: inputs[0].shape[0], height: tiledHeight, width: tiledWidth,
+            textLength: textLength, gistCount: gistCount,
+            referenceSequenceLength: referenceSequenceLength, channels: Fibo2Channels,
+            layers: Fibo2Layers, injectionLayers: Fibo2InjectionLayers,
+            usesFlashAttention: valueOr(useFlashAttention, .scale1)
+          ).1
+        })
     case .flux3_5b:
       tiledWidth =
         tiledDiffusion.isEnabled ? min(tiledDiffusion.tileSize.width * 8, startWidth) : startWidth
@@ -2352,7 +2389,7 @@ extension UNetFromNNC {
       case .v2, .sd3, .sd3Large, .pixart, .auraflow, .kandinsky21, .svdI2v, .wurstchenStageC,
         .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1,
         .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b,
-        .flux3_5b, .mossImage,
+        .flux3_5b, .fibo2, .mossImage,
         .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
         .ideogram4, .krea2,
         .longcatVideoAvatar1_5, .minimaxH3:
@@ -2420,7 +2457,7 @@ extension UNetFromNNC {
       modelKey = "stage_c"
     case .sd3, .pixart, .auraflow, .flux1, .sd3Large, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
       .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2,
-      .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b,
+      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b,
       .ideogram4, .krea2, .ltx2,
       .ltx2_3,
       .seedvr2_3b,
@@ -2470,7 +2507,7 @@ extension UNetFromNNC {
           return true
         }
       } else if version == .flux2 || version == .flux2_4b || version == .flux2_9b
-        || version == .flux3_5b || version == .mossImage
+        || version == .flux3_5b || version == .fibo2 || version == .mossImage
       {  // FLUX.2 is a 32B-parameter model, offload all MLP layers.
         if name.contains("_up_proj-") || name.contains("_w3-") {
           return true
@@ -2613,7 +2650,7 @@ extension UNetFromNNC {
               let layers = MiniMaxH3Layout.load(filePath: filePath).layers.count
               return [Int: Int](uniqueKeysWithValues: (0..<layers).map { ($0, $0) })
             case .kandinsky21, .svdI2v, .wurstchenStageC, .wurstchenStageB, .seedvr2_3b,
-              .seedvr2_7b:
+              .seedvr2_7b, .fibo2:
               fatalError()
             }
           }()
@@ -3268,6 +3305,40 @@ extension UNetFromNNC {
             tokenEncoding
           return finalEncoding
         }
+      case .fibo2:
+        // Rotary is [gist, image, context images]; only the image part is tiled.
+        if $0.0 == 0 {
+          let shape = $0.1.shape
+          let gistCount = inputs[1].shape[1]
+          let imageLength = (originalShape[1] / 2) * (originalShape[2] / 2)
+          let referenceLength = shape[1] - gistCount - imageLength
+          let graph = $0.1.graph
+          let rotary = DynamicGraph.Tensor<FloatType>($0.1)
+          let imageEncoding = rotary[
+            0..<shape[0], gistCount..<(gistCount + imageLength), 0..<shape[2], 0..<shape[3]
+          ].copied().reshaped(.NHWC(1, originalShape[1] / 2, originalShape[2] / 2, shape[3]))
+          let h = inputEndYPad / 2 - inputStartYPad / 2
+          let w = inputEndXPad / 2 - inputStartXPad / 2
+          let sliceEncoding = imageEncoding[
+            0..<1, (inputStartYPad / 2)..<(inputEndYPad / 2),
+            (inputStartXPad / 2)..<(inputEndXPad / 2), 0..<shape[3]
+          ].copied().reshaped(.NHWC(shape[0], h * w, 1, shape[3]))
+          var finalEncoding = graph.variable(
+            $0.1.kind, .NHWC(shape[0], gistCount + h * w + referenceLength, 1, shape[3]),
+            of: FloatType.self)
+          finalEncoding[0..<shape[0], 0..<gistCount, 0..<1, 0..<shape[3]] =
+            rotary[0..<shape[0], 0..<gistCount, 0..<shape[2], 0..<shape[3]].copied()
+          finalEncoding[0..<shape[0], gistCount..<(gistCount + h * w), 0..<1, 0..<shape[3]] =
+            sliceEncoding
+          if referenceLength > 0 {
+            finalEncoding[
+              0..<shape[0], (gistCount + h * w)..<(gistCount + h * w + referenceLength), 0..<1,
+              0..<shape[3]] = rotary[
+                0..<shape[0], (gistCount + imageLength)..<shape[1], 0..<shape[2], 0..<shape[3]
+              ].copied()
+          }
+          return finalEncoding
+        }
       case .flux2, .flux2_9b, .flux2_4b, .flux3_5b:
         if $0.0 == 0 {
           let shape = $0.1.shape
@@ -3741,6 +3812,10 @@ extension UNetFromNNC {
           context[0..<batchSize, 0..<tokenLength, 0..<contextShape[2]].copied(),
         ] + inputs[3...] + [branchRot]
       unet.compile(inputs: compileInputs)
+      return
+    case .fibo2:
+      // Fibo 2.0 Edit Turbo runs without classifier-free guidance.
+      unet.compile(inputs: inputs)
       return
     case .flux3_5b:
       guard isCfgEnabled else {
@@ -5052,6 +5127,9 @@ extension UNetFromNNC {
           (shape[0] / 2)..<shape[0], index: 1, tokenLength: tokenLengthCond, skipsLayers: false)
       }
       return Functional.concat(axis: 0, etUncond, etCond)
+    case .fibo2:
+      // Fibo 2.0 Edit Turbo runs without classifier-free guidance.
+      return unet(inputs: firstInput, restInputs)[0].as(of: FloatType.self)
     case .flux3_5b:
       guard isCfgEnabled else {
         return unet(inputs: firstInput, restInputs)[0].as(of: FloatType.self)
@@ -5670,7 +5748,7 @@ extension UNetFromNNC {
     case .v1, .v2, .kandinsky21, .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageC,
       .wurstchenStageB, .sd3, .pixart, .auraflow, .flux1, .sd3Large, .hunyuanVideo, .wan21_1_3b,
       .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage,
-      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b,
+      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b,
       .cosmos2_5_2_9b, .seedvr2_3b, .seedvr2_7b,
       .ideogram4, .krea2, .longcatVideoAvatar1_5:
       return (0, 0)
@@ -5796,7 +5874,7 @@ extension UNetFromNNC {
       tileScaleFactor = 2
     case .wurstchenStageC:
       tileScaleFactor = 1
-    case .auraflow, .pixart, .flux1, .ernieImage, .flux2, .flux2_4b, .flux3_5b, .mossImage,
+    case .auraflow, .pixart, .flux1, .ernieImage, .flux2, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
       .flux2_9b,
       .hunyuanVideo,
       .hiDreamI1,
@@ -6051,7 +6129,7 @@ extension UNetFromNNC {
       case .v2, .sd3, .sd3Large, .pixart, .auraflow, .kandinsky21, .svdI2v, .wurstchenStageC,
         .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1,
         .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b,
-        .flux3_5b, .mossImage,
+        .flux3_5b, .fibo2, .mossImage,
         .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
         .ideogram4, .krea2,
         .longcatVideoAvatar1_5, .minimaxH3:
@@ -6092,7 +6170,7 @@ extension UNetFromNNC {
     case .v1, .v2, .sd3, .sd3Large, .pixart, .auraflow, .flux1, .sdxlBase, .sdxlRefiner, .ssd1b,
       .svdI2v, .kandinsky21, .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1,
       .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b,
-      .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ideogram4, .krea2,
+      .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ideogram4, .krea2,
       .ltx2, .ltx2_3,
       .seedvr2_3b,
       .seedvr2_7b,

@@ -50,7 +50,7 @@ public enum LoRAImporter {
     let unetMapper: ModelWeightMapper
     let unetFixedMapper: ModelWeightMapper
     switch version {
-    case .longcatVideoAvatar1_5:
+    case .longcatVideoAvatar1_5, .fibo2:
       fatalError()
     case .mossImage:
       (unetMapper, unet) = MOSSImage(
@@ -300,7 +300,7 @@ public enum LoRAImporter {
       let inputDim: Int
       let conditionalLength: Int
       switch version {
-      case .longcatVideoAvatar1_5:
+      case .longcatVideoAvatar1_5, .fibo2:
         fatalError()
       case .mossImage:
         inputDim = 32
@@ -390,7 +390,7 @@ public enum LoRAImporter {
       let isCfgEnabled: Bool
       let isGuidanceEmbedEnabled: Bool
       switch version {
-      case .longcatVideoAvatar1_5:
+      case .longcatVideoAvatar1_5, .fibo2:
         fatalError()
       case .mossImage:
         isCfgEnabled = false
@@ -780,7 +780,7 @@ public enum LoRAImporter {
       // These values doesn't matter, it won't affect the model shape, just the input vector.
       let vectors: [DynamicGraph.Tensor<FloatType>]
       switch version {
-      case .longcatVideoAvatar1_5:
+      case .longcatVideoAvatar1_5, .fibo2:
         fatalError()
       case .sdxlBase, .ssd1b:
         vectors = [graph.variable(.CPU, .WC(2, 2816), of: FloatType.self)]
@@ -798,7 +798,7 @@ public enum LoRAImporter {
         fatalError()
       }
       switch version {
-      case .longcatVideoAvatar1_5:
+      case .longcatVideoAvatar1_5, .fibo2:
         fatalError()
       case .mossImage:
         // The refined text and the modulations are in FP32, they are appended when compiling.
@@ -1667,7 +1667,7 @@ public enum LoRAImporter {
     var textModelMapping1: ModelWeightMapping
     var textModelMapping2: ModelWeightMapping
     switch modelVersion {
-    case .longcatVideoAvatar1_5:
+    case .longcatVideoAvatar1_5, .fibo2:
       fatalError()
     case .v1:
       textModelMapping1 = StableDiffusionMapping.CLIPTextModel
@@ -1946,7 +1946,7 @@ public enum LoRAImporter {
     try graph.openStore(LoRAZoo.filePathForModelDownloaded(filename)) { store in
       store.removeAll()
       switch modelVersion {
-      case .longcatVideoAvatar1_5:
+      case .longcatVideoAvatar1_5, .fibo2:
         fatalError()
       case .minimaxH3:
         break
@@ -2150,7 +2150,7 @@ public enum LoRAImporter {
       let modelPrefix: String
       let modelPrefixFixed: String
       switch modelVersion {
-      case .longcatVideoAvatar1_5:
+      case .longcatVideoAvatar1_5, .fibo2:
         fatalError()
       case .v1, .v2, .kandinsky21, .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v:
         modelPrefix = "unet"

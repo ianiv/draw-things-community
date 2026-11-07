@@ -23,6 +23,11 @@ struct Converter: ParsableCommand {
     help:
       "Treat the input file as a Whisper-large-v3 audio encoder safetensors and convert it alone.")
   var audioEncoder = false
+  @Flag(
+    help:
+      "Treat the input as Fibo 2.0's text_encoder directory (Qwen3-VL-4B safetensors) and convert it alone."
+  )
+  var fibo2TextEncoder = false
 
   private struct Specification: Codable {
     var name: String
@@ -40,6 +45,10 @@ struct Converter: ParsableCommand {
     ModelZoo.externalUrls = [URL(fileURLWithPath: outputDirectory)]
     if audioEncoder {
       try convertAudioEncoder()
+      return
+    }
+    if fibo2TextEncoder {
+      try convertFibo2TextEncoder()
       return
     }
     let fileName = Importer.cleanup(filename: name)
@@ -198,6 +207,12 @@ struct Converter: ParsableCommand {
       if autoencoder == nil {
         autoencoder = "seedvr2_vae_f16.ckpt"
       }
+    case .fibo2:
+      // Converted separately with --fibo2-text-encoder.
+      textEncoder = "fibo_2_qwen_3_vl_4b_f16.ckpt"
+      if autoencoder == nil {
+        autoencoder = "flux_2_vae_f16.ckpt"
+      }
     case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage:
       fatalError()
     case .ltx2, .ltx2_3:
@@ -274,5 +289,149 @@ struct Converter: ParsableCommand {
       }
       print("Wrote audio encoder to \(outputPath)")
     }
+  }
+
+  private enum Fibo2TextEncoderError: Error {
+    case cannotOpenFile(String)
+    case missingTensor(String)
+  }
+
+  /// Converts Qwen3-VL-4B (text and vision) to the names Fibo 2.0's encoder reads. Hugging Face
+  /// rotates the two halves of each head, the engine rotates adjacent pairs, so the query and key
+  /// projections (and their norms) are reordered per head.
+  private func convertFibo2TextEncoder() throws {
+    let directory = URL(fileURLWithPath: file)
+    let urls = try FileManager.default.contentsOfDirectory(
+      at: directory, includingPropertiesForKeys: nil
+    ).filter { $0.pathExtension == "safetensors" }.sorted { $0.path < $1.path }
+    var sources = [String: (SafeTensors, TensorDescriptor)]()
+    for url in urls {
+      guard let safeTensors = SafeTensors(url: url) else {
+        throw Fibo2TextEncoderError.cannotOpenFile(url.path)
+      }
+      for (key, value) in safeTensors.states {
+        sources[key] = (safeTensors, value)
+      }
+    }
+    func read(_ key: String) throws -> Tensor<Float> {
+      guard let (safeTensors, descriptor) = sources[key] else {
+        throw Fibo2TextEncoderError.missingTensor(key)
+      }
+      return try safeTensors.with(descriptor) { Tensor<Float>(from: $0).toCPU() }
+    }
+    // Rows [head * dim + i] and [head * dim + i + dim / 2] become rows 2i and 2i + 1 of the head.
+    func interleave(_ tensor: Tensor<Float>, headDimension: Int) -> Tensor<Float> {
+      let shape = tensor.shape
+      let rows = shape[0]
+      let columns = shape.count > 1 ? shape[1] : 1
+      var result = Tensor<Float>(.CPU, format: .NCHW, shape: shape)
+      let half = headDimension / 2
+      tensor.withUnsafeBytes { source in
+        let source = source.baseAddress!.assumingMemoryBound(to: Float.self)
+        result.withUnsafeMutableBytes { destination in
+          let destination = destination.baseAddress!.assumingMemoryBound(to: Float.self)
+          for row in 0..<rows {
+            let head = row / headDimension
+            let i = row % headDimension
+            let target = head * headDimension + (i < half ? i * 2 : (i - half) * 2 + 1)
+            for column in 0..<columns {
+              destination[target * columns + column] = source[row * columns + column]
+            }
+          }
+        }
+      }
+      return result
+    }
+    func rows(_ tensor: Tensor<Float>, _ range: Range<Int>) -> Tensor<Float> {
+      let shape = tensor.shape
+      if shape.count == 1 {
+        return tensor[range].copied()
+      }
+      return tensor[range, 0..<shape[1]].copied()
+    }
+    let graph = DynamicGraph()
+    let fileName = Importer.cleanup(filename: name)
+    let outputPath = URL(fileURLWithPath: outputDirectory)
+      .appendingPathComponent("\(fileName)_f16.ckpt").path
+    try graph.openStore(outputPath) { store in
+      func write(_ name: String, _ tensor: Tensor<Float>) {
+        store.write(name, tensor: Tensor<FloatType>(from: tensor))
+      }
+      try store.withTransaction {
+        // Text model: 36 layers, 32 query heads and 8 key / value heads of 128.
+        let text = "model.language_model"
+        write(
+          "__text_model__[t-tok_embeddings-0-0]", try read("\(text).embed_tokens.weight"))
+        write("__text_model__[t-norm-0-0]", try read("\(text).norm.weight"))
+        for layer in 0..<36 {
+          let prefix = "\(text).layers.\(layer)"
+          write(
+            "__text_model__[t-q_proj-\(layer)-0]",
+            interleave(try read("\(prefix).self_attn.q_proj.weight"), headDimension: 128))
+          write(
+            "__text_model__[t-k_proj-\(layer)-0]",
+            interleave(try read("\(prefix).self_attn.k_proj.weight"), headDimension: 128))
+          write("__text_model__[t-v_proj-\(layer)-0]", try read("\(prefix).self_attn.v_proj.weight"))
+          write(
+            "__text_model__[t-out_proj-\(layer)-0]", try read("\(prefix).self_attn.o_proj.weight"))
+          write(
+            "__text_model__[t-norm_q-\(layer)-0]",
+            interleave(try read("\(prefix).self_attn.q_norm.weight"), headDimension: 128))
+          write(
+            "__text_model__[t-norm_k-\(layer)-0]",
+            interleave(try read("\(prefix).self_attn.k_norm.weight"), headDimension: 128))
+          write(
+            "__text_model__[t-input_layernorm-\(layer)-0]",
+            try read("\(prefix).input_layernorm.weight"))
+          write(
+            "__text_model__[t-post_attention_layernorm-\(layer)-0]",
+            try read("\(prefix).post_attention_layernorm.weight"))
+          write(
+            "__text_model__[t-mlp_gate_proj-\(layer)-0]", try read("\(prefix).mlp.gate_proj.weight"))
+          write("__text_model__[t-mlp_up_proj-\(layer)-0]", try read("\(prefix).mlp.up_proj.weight"))
+          write(
+            "__text_model__[t-mlp_down_proj-\(layer)-0]", try read("\(prefix).mlp.down_proj.weight"))
+        }
+        // Vision tower: 24 blocks, 16 heads of 64, under its Hugging Face names.
+        let visual = "model.visual"
+        func vision(_ name: String, _ parameter: Int, _ tensor: Tensor<Float>) {
+          write("__vision_model__[t-\(name)-0-\(parameter)]", tensor)
+        }
+        let patchWeight = try read("\(visual).patch_embed.proj.weight")
+        vision(
+          "\(visual).patch_embed.proj", 0,
+          patchWeight.reshaped(format: .NCHW, shape: [patchWeight.shape[0], 3 * 2 * 16 * 16]))
+        vision("\(visual).patch_embed.proj", 1, try read("\(visual).patch_embed.proj.bias"))
+        write("__vision_model__[t-pos_embed-0-0]", try read("\(visual).pos_embed.weight"))
+        for block in 0..<24 {
+          let prefix = "\(visual).blocks.\(block)"
+          let qkvWeight = try read("\(prefix).attn.qkv.weight")
+          let qkvBias = try read("\(prefix).attn.qkv.bias")
+          for (index, projection) in ["q_proj", "k_proj", "v_proj"].enumerated() {
+            var weight = rows(qkvWeight, (index * 1_024)..<((index + 1) * 1_024))
+            var bias = rows(qkvBias, (index * 1_024)..<((index + 1) * 1_024))
+            if index < 2 {
+              weight = interleave(weight, headDimension: 64)
+              bias = interleave(bias, headDimension: 64)
+            }
+            vision("\(prefix).attn.\(projection)", 0, weight)
+            vision("\(prefix).attn.\(projection)", 1, bias)
+          }
+          for name in ["attn.proj", "norm1", "norm2", "mlp.linear_fc1", "mlp.linear_fc2"] {
+            vision("\(prefix).\(name)", 0, try read("\(prefix).\(name).weight"))
+            vision("\(prefix).\(name)", 1, try read("\(prefix).\(name).bias"))
+          }
+        }
+        var mergers = ["\(visual).merger"]
+        mergers += (0..<3).map { "\(visual).deepstack_merger_list.\($0)" }
+        for merger in mergers {
+          for name in ["norm", "linear_fc1", "linear_fc2"] {
+            vision("\(merger).\(name)", 0, try read("\(merger).\(name).weight"))
+            vision("\(merger).\(name)", 1, try read("\(merger).\(name).bias"))
+          }
+        }
+      }
+    }
+    print("Wrote Fibo 2.0 text encoder to \(outputPath)")
   }
 }

@@ -1721,7 +1721,7 @@ private func defaultImportScale(for version: ModelVersion, artifactFileName: Str
     return 8
   case .sdxlBase, .sdxlRefiner, .ssd1b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .zImage,
     .ernieImage, .wurstchenStageC, .wurstchenStageB, .sd3, .sd3Large, .auraflow, .flux1, .flux2,
-    .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
+    .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
     .ltx2_3, .ideogram4, .krea2:
     return 16
   case .pixart:
@@ -1745,7 +1745,7 @@ private func validateCustomTextEncoderSupport(
     return
   case .kandinsky21, .svdI2v, .wurstchenStageC, .wurstchenStageB, .sd3, .sd3Large, .pixart,
     .auraflow, .flux1, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage,
-    .qwenImage2_1, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage,
+    .qwenImage2_1, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
     .cosmos2_5_2b, .cosmos2_5_2_9b,
     .ltx2, .ltx2_3,
     .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
@@ -1775,7 +1775,7 @@ private func projectedImportedOutputFiles(
       files.append("\(modelName)_ministral_3_3b_q8p.ckpt")
     case .kandinsky21, .svdI2v, .wurstchenStageC, .wurstchenStageB, .sd3, .sd3Large, .pixart,
       .auraflow, .flux1, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage,
-      .qwenImage2_1, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage,
+      .qwenImage2_1, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
       .cosmos2_5_2b, .cosmos2_5_2_9b,
       .ltx2,
       .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
@@ -4042,7 +4042,7 @@ private func runLoRATraining(context: DrawThingsCLIContext, _ options: LoRATrain
     }
   case .flux1:
     tokenizerStack = [tokenizers.tokenizerV2, tokenizers.tokenizerT5]
-  case .flux2_9b, .flux2_4b, .flux3_5b, .krea2:
+  case .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .krea2:
     tokenizerStack = [tokenizers.tokenizerQwen3]
   case .qwenImage:
     tokenizerStack = [tokenizers.tokenizerQwen25]

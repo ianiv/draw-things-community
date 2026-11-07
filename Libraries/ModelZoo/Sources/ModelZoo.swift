@@ -71,6 +71,8 @@ public struct ModelZoo: DownloadZoo {
       return "FLUX.2 4B"
     case .flux3_5b:
       return "FLUX.3 5B"
+    case .fibo2:
+      return "Fibo 2.0"
     case .mossImage:
       return "MOSS Image"
     case .cosmos2_5_2b:
@@ -2889,7 +2891,7 @@ public struct ModelZoo: DownloadZoo {
       return .u(conditionScale: 1)
     case .sd3, .sd3Large, .auraflow, .flux1, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1,
       .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b,
-      .flux3_5b, .mossImage,
+      .flux3_5b, .fibo2, .mossImage,
       .ltx2, .ltx2_3, .ernieImage, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2,
       .longcatVideoAvatar1_5, .minimaxH3:
       return .u(conditionScale: 1000)
@@ -2905,7 +2907,7 @@ public struct ModelZoo: DownloadZoo {
     case .kandinsky21, .sdxlBase, .sdxlRefiner, .v1, .v2, .ssd1b, .wurstchenStageC,
       .wurstchenStageB, .sd3, .sd3Large, .pixart, .auraflow, .flux1, .hunyuanVideo, .wan21_1_3b,
       .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage,
-      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b,
+      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b,
       .cosmos2_5_2_9b, .ltx2,
       .ltx2_3,
       .seedvr2_3b,
@@ -2943,7 +2945,7 @@ public struct ModelZoo: DownloadZoo {
     case .cosmos2_5_2b, .cosmos2_5_2_9b:
       return .rf(.init(sigmaMin: 0, sigmaMax: 1, conditionScale: 1))
     case .sd3, .sd3Large, .auraflow, .flux1, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1,
-      .hiDreamO1, .qwenImage, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+      .hiDreamO1, .qwenImage, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
       .mossImage, .ltx2,
       .ltx2_3,
       .ernieImage, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2,
@@ -2970,7 +2972,7 @@ public struct ModelZoo: DownloadZoo {
     case .hiDreamI1:
       return 128
     case .hiDreamO1, .hunyuanVideo, .qwenImage, .qwenImage2_1, .zImage, .ernieImage, .flux2,
-      .flux3_5b, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
+      .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
       return 0
     case .wan21_1_3b, .wan21_14b, .wan22_5b, .flux2_9b, .flux2_4b, .cosmos2_5_2b,
       .cosmos2_5_2_9b,
@@ -3143,7 +3145,7 @@ public struct ModelZoo: DownloadZoo {
           1.65655173, 1.68533454,
         ], 1, nil, nil, nil
       )
-    case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage:
+    case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
       return (
         [
           -6.76177666e-02, -7.15223551e-02, -7.53413364e-02, -7.44939372e-02,
@@ -3416,7 +3418,7 @@ public struct ModelZoo: DownloadZoo {
     case .v1, .v2, .kandinsky21, .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageC,
       .wurstchenStageB, .sd3, .pixart, .auraflow, .flux1, .sd3Large, .hunyuanVideo, .wan21_1_3b,
       .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage,
-      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b,
+      .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b,
       .cosmos2_5_2_9b, .ideogram4,
       .krea2,
       .ltx2, .ltx2_3,
@@ -3433,7 +3435,7 @@ public struct ModelZoo: DownloadZoo {
     case .v1, .v2, .svdI2v, .ssd1b, .sdxlBase, .sdxlRefiner, .pixart, .auraflow, .kandinsky21,
       .wurstchenStageC, .wurstchenStageB, .sd3, .sd3Large, .flux1, .hiDreamI1, .hiDreamO1, .zImage,
       .ernieImage, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .qwenImage, .qwenImage2_1, .wan22_5b,
-      .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b,
+      .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b,
       .cosmos2_5_2_9b, .seedvr2_3b, .seedvr2_7b,
       .ideogram4,
       .krea2:
@@ -3505,7 +3507,7 @@ public struct ModelZoo: DownloadZoo {
       .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageB, .wurstchenStageC, .zImage,
       .ernieImage,
       .flux2, .flux2_9b,
-      .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .seedvr2_3b,
+      .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b, .seedvr2_3b,
       .seedvr2_7b, .ideogram4, .krea2:
       return 30
     }
@@ -3529,7 +3531,7 @@ public struct ModelZoo: DownloadZoo {
       switch specification.version {
       case .v1, .v2, .kandinsky21, .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageC,
         .wurstchenStageB, .sd3, .pixart, .auraflow, .sd3Large, .wan21_1_3b, .wan21_14b, .qwenImage,
-        .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+        .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
         .mossImage,
         .cosmos2_5_2b, .cosmos2_5_2_9b,
         .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .hiDreamO1, .ideogram4, .krea2,
@@ -3638,6 +3640,8 @@ public struct ModelZoo: DownloadZoo {
         return fileSize < 4 * 1_024 * 1_024 * 1_024
       case .flux3_5b:
         return fileSize < 5 * 1_024 * 1_024 * 1_024
+      case .fibo2:
+        return fileSize < 10 * 1_024 * 1_024 * 1_024
       case .mossImage:
         return fileSize < 6 * 1_024 * 1_024 * 1_024
       case .ltx2, .ltx2_3:
@@ -3724,6 +3728,8 @@ public struct ModelZoo: DownloadZoo {
         return fileSize < 7 * 1_024 * 1_024 * 1_024
       case .flux3_5b:
         return fileSize < 9 * 1_024 * 1_024 * 1_024
+      case .fibo2:
+        return fileSize < 14 * 1_024 * 1_024 * 1_024
       case .mossImage:
         return fileSize < 9 * 1_024 * 1_024 * 1_024
       case .ltx2, .ltx2_3:
@@ -3857,7 +3863,7 @@ extension ModelZoo {
         || version == .flux2 || version == .flux2_9b
         || version == .flux2_4b || version == .cosmos2_5_2b || version == .cosmos2_5_2_9b
         || version == .ernieImage
-        || version == .ideogram4 || version == .krea2
+        || version == .ideogram4 || version == .krea2 || version == .fibo2
     else { return false }
     if isConsistencyModel {
       return false
@@ -3881,7 +3887,7 @@ extension ModelZoo {
   public static func isCLIPSkipAvailable(_ version: ModelVersion) -> Bool {
     switch version {
     case .pixart, .auraflow, .wan21_14b, .wan21_1_3b, .qwenImage, .qwenImage2_1, .svdI2v, .wan22_5b,
-      .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b,
+      .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b,
       .cosmos2_5_2_9b,
       .ltx2, .ltx2_3,
       .seedvr2_3b, .seedvr2_7b, .hiDreamO1, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:

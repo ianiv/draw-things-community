@@ -46,6 +46,205 @@ public struct TextEncoder<FloatType: TensorNumeric & BinaryFloatingPoint> {
 }
 
 extension TextEncoder {
+  private func encodeFibo2(
+    images: [DynamicGraph.Tensor<FloatType>], tokens: [DynamicGraph.Tensor<Int32>],
+    tokenLengthUncond: inout Int, tokenLengthCond: inout Int
+  ) -> ([DynamicGraph.Tensor<FloatType>], [Model]) {
+    // Fibo 2.0 runs without classifier-free guidance: only the conditional half is encoded.
+    let graph = tokens[0].graph
+    let originalTokenLength = tokens[0].shape[0] / 2
+    var tokenLength = originalTokenLength
+    let externalData: DynamicGraph.Store.Codec =
+      externalOnDemand || deviceProperties.memoryCapacity < .high
+      ? .externalOnDemand : .externalData(deviceProperties.isFreadPreferred ? .fread : .mmap)
+    let tokenIDs = tokens[0].rawValue.toCPU()
+    let imageStarts = (0..<tokenLengthCond).filter {
+      tokenIDs[originalTokenLength + $0] == 151_655
+    }
+    precondition(imageStarts.count <= images.count)
+    var imageGrids = [(t: Int, h: Int, w: Int)]()
+    var imageFeatures = [DynamicGraph.Tensor<FloatType>]()
+    if !imageStarts.isEmpty {
+      // Qwen3-VL-4B's vision tower.
+      let configuration = Qwen3_5VisionConfiguration()
+      var imagePatches = [DynamicGraph.Tensor<Float>]()
+      for image in images.prefix(imageStarts.count) {
+        // Each image is thumbnailed to 768 pixels a side, then Qwen3-VL's smart resize.
+        let height = image.shape[1]
+        let width = image.shape[2]
+        let scale = min(1, 768 / Double(max(height, width)))
+        let thumbnailHeight = max(1, Int((Double(height) * scale).rounded()))
+        let thumbnailWidth = max(1, Int((Double(width) * scale).rounded()))
+        var resizedHeight = max(32, Int((Double(thumbnailHeight) / 32).rounded()) * 32)
+        var resizedWidth = max(32, Int((Double(thumbnailWidth) / 32).rounded()) * 32)
+        if resizedHeight * resizedWidth > 1_605_632 {
+          let beta = sqrt(Double(thumbnailHeight * thumbnailWidth) / 1_605_632)
+          resizedHeight = max(32, Int(floor(Double(thumbnailHeight) / beta / 32)) * 32)
+          resizedWidth = max(32, Int(floor(Double(thumbnailWidth) / beta / 32)) * 32)
+        } else if resizedHeight * resizedWidth < 3_136 {
+          let beta = sqrt(3_136 / Double(thumbnailHeight * thumbnailWidth))
+          resizedHeight = Int(ceil(Double(thumbnailHeight) * beta / 32)) * 32
+          resizedWidth = Int(ceil(Double(thumbnailWidth) * beta / 32)) * 32
+        }
+        let (patches, grid) = Qwen3_5VisionPreprocess(
+          image[0..<1, 0..<height, 0..<width, 0..<3].copied().rawValue.toCPU(),
+          configuration: configuration, size: (resizedHeight, resizedWidth))
+        imageGrids.append(grid)
+        imagePatches.append(graph.variable(patches.toGPU(0)))
+        let imageLength = grid.h * grid.w / 4
+        tokenLength += imageLength - 1
+        tokenLengthUncond += imageLength - 1
+        tokenLengthCond += imageLength - 1
+      }
+      let rotary = graph.variable(
+        Qwen3_5VisionRotaryEmbedding(
+          gridThw: imageGrids, configuration: configuration, of: Float.self
+        ).toGPU(0))
+      let offsets = graph.variable(
+        Qwen3_5VisionSequenceOffsets(gridThw: imageGrids).offsets.toGPU(0))
+      let patchesGPU =
+        imagePatches.count == 1
+        ? imagePatches[0]
+        : Concat(axis: 0)(inputs: imagePatches[0], Array(imagePatches.dropFirst()))[0].as(
+          of: Float.self)
+      let visionModel = Qwen3_5VisionTransformer(
+        Float.self, gridThw: imageGrids, configuration: configuration,
+        deepStackLayers: [5, 11, 17], attentionDataType: .Float16)
+      visionModel.maxConcurrency = .limit(1)
+      TensorData.makeExternalData(for: filePaths[0], graph: graph)
+      graph.openStore(
+        filePaths[0], flags: .readOnly,
+        externalStore: TensorData.externalStore(filePath: filePaths[0])
+      ) { store in
+        let positionWeight = store.read(
+          "__vision_model__[t-pos_embed-0-0]", codec: [.jit, .q8p, .i8x, .ezm7, externalData])!
+        let positions = graph.variable(
+          Qwen3_5VisionPositionEmbedding(
+            weight: positionWeight, gridThw: imageGrids, configuration: configuration,
+            of: Float.self
+          ).toGPU(0))
+        visionModel.compile(inputs: patchesGPU, positions, rotary, offsets)
+        // The converter writes the vision tower under its Hugging Face names.
+        try! store.read(
+          "vision_model", model: visionModel, strict: true,
+          codec: [.jit, .q8p, .i8x, .ezm7, externalData])
+        imageFeatures = visionModel(inputs: patchesGPU, positions, rotary, offsets).map {
+          DynamicGraph.Tensor<FloatType>(from: $0)
+        }
+      }
+    }
+    var tokensGPU = tokens[0][originalTokenLength..<(originalTokenLength * 2)].toGPU(0)
+    var additionalInputs = [DynamicGraph.AnyTensor]()
+    var expandedImageStarts = [Int]()
+    var expansion = 0
+    for (start, grid) in zip(imageStarts, imageGrids) {
+      expandedImageStarts.append(start + expansion)
+      expansion += grid.h * grid.w / 4 - 1
+    }
+    if !imageStarts.isEmpty {
+      var expanded = Tensor<Int32>(
+        Array(repeating: 151_643, count: tokenLength), kind: .CPU, format: .NHWC,
+        shape: [tokenLength])
+      var mask = Tensor<FloatType>(
+        Array(repeating: 1, count: tokenLength), .CPU, .WC(tokenLength, 1))
+      var imageIndex = 0
+      var output = 0
+      for i in 0..<originalTokenLength {
+        if imageIndex < imageStarts.count && i == imageStarts[imageIndex] {
+          let length = imageGrids[imageIndex].h * imageGrids[imageIndex].w / 4
+          for j in output..<(output + length) {
+            expanded[j] = 151_655
+            mask[j, 0] = 0
+          }
+          output += length
+          imageIndex += 1
+        } else {
+          expanded[output] = tokenIDs[originalTokenLength + i]
+          output += 1
+        }
+      }
+      tokensGPU = graph.variable(expanded.toGPU(0))
+      additionalInputs.append(graph.variable(mask.toGPU(0)))
+      // The merged image features, then the three deepstack features.
+      for features in imageFeatures {
+        var injected = graph.variable(.GPU(0), .WC(tokenLength, 2_560), of: FloatType.self)
+        injected.full(0)
+        var featureStart = 0
+        for (imageStart, grid) in zip(expandedImageStarts, imageGrids) {
+          let imageLength = grid.h * grid.w / 4
+          injected[imageStart..<(imageStart + imageLength), 0..<2_560] =
+            features[featureStart..<(featureStart + imageLength), 0..<2_560].copied()
+          featureStart += imageLength
+        }
+        additionalInputs.append(injected)
+      }
+    }
+    // Hidden states after layer i are Hugging Face's hidden_states[i + 1].
+    let hiddenStates = Array(Set(Fibo2TextEncoderLayers.flatMap { $0 })).sorted()
+    let textModel = Qwen3(
+      FloatType.self, vocabularySize: 151_936, width: 2_560, tokenLength: tokenLength,
+      layers: hiddenStates.last!, MLP: 9_728, heads: 32,
+      outputHiddenStates: hiddenStates.map { $0 - 1 }, noFinalNormalizedOutput: true,
+      batchSize: 1, usesFlashAttention: usesFlashAttention,
+      injectEmbeddings: !imageStarts.isEmpty, deepStackLayers: imageStarts.isEmpty ? 0 : 3)
+    var causalAttentionMask = Tensor<FloatType>(
+      Array(repeating: 0, count: tokenLength * tokenLength), .CPU,
+      .NHWC(1, 1, tokenLength, tokenLength))
+    for row in 0..<(tokenLength - 1) {
+      for column in (row + 1)..<tokenLength {
+        causalAttentionMask[0, 0, row, column] = -FloatType.greatestFiniteMagnitude
+      }
+    }
+    let rotaryGPU = graph.variable(
+      QwenVLRotaryEmbedding(
+        sequenceLength: tokenLength,
+        images: zip(expandedImageStarts, imageGrids).map { ($0.0, $0.1.h / 2, $0.1.w / 2) },
+        of: FloatType.self
+      ).toGPU(0))
+    let causalAttentionMaskGPU = graph.variable(causalAttentionMask.toGPU(0))
+    textModel.maxConcurrency = .limit(1)
+    let inputs: [DynamicGraph.AnyTensor] =
+      [tokensGPU, rotaryGPU, causalAttentionMaskGPU] + additionalInputs
+    textModel.compile(inputs: inputs)
+    if !weightsCache.detach(filePaths[0], to: textModel.parameters) {
+      TensorData.makeExternalData(for: filePaths[0], graph: graph)
+      graph.openStore(
+        filePaths[0], flags: .readOnly,
+        externalStore: TensorData.externalStore(filePath: filePaths[0])
+      ) { store in
+        store.read(
+          "text_model", model: textModel, codec: [.q8p, .q6p, .q4p, .ezm7, .i8x, .jit, externalData])
+      }
+    }
+    let outputs = textModel(inputs: tokensGPU, Array(inputs.dropFirst())).map {
+      $0.as(of: FloatType.self)
+    }
+    weightsCache.attach(filePaths[0], from: textModel.parameters)
+    // Each hidden state is RMS normalized in FP32 (no weight), then three per bundle are
+    // concatenated: [1, T, 6 * 3 * 2560].
+    let x = Input()
+    let norm = RMSNorm(epsilon: 1e-6, axis: [1], elementwiseAffine: false)
+    let normalize = Model([x], [norm(x.to(.Float32)).to(of: x)])
+    let length = tokenLengthCond
+    normalize.compile(inputs: outputs[0][0..<length, 0..<2_560].copied())
+    var normalized = [Int: DynamicGraph.Tensor<FloatType>]()
+    for (layer, output) in zip(hiddenStates, outputs) {
+      normalized[layer] = normalize(inputs: output[0..<length, 0..<2_560].copied())[0].as(
+        of: FloatType.self)
+    }
+    let layerCount = Fibo2TextEncoderLayers[0].count
+    var c = graph.variable(
+      .GPU(0), .HWC(1, length, Fibo2TextBundles * Fibo2TextBundleChannels), of: FloatType.self)
+    for (bundle, layers) in Fibo2TextEncoderLayers.enumerated() {
+      for (j, layer) in layers.enumerated() {
+        let start = (bundle * layerCount + j) * 2_560
+        c[0..<1, 0..<length, start..<(start + 2_560)] =
+          normalized[layer]!.reshaped(.HWC(1, length, 2_560))
+      }
+    }
+    return ([c], [textModel])
+  }
+
   private func encodeMiniMaxH3(
     images: [DynamicGraph.Tensor<FloatType>], tokens: [DynamicGraph.Tensor<Int32>],
     tokenLengthUncond: inout Int, tokenLengthCond: inout Int, modifier: SamplerModifier
@@ -4438,6 +4637,10 @@ extension TextEncoder {
         injectedEmbeddings: injectedEmbeddings,
         tokenLengthUncond: &tokenLengthUncond, tokenLengthCond: &tokenLengthCond,
         modifier: modifier, textModels: existingTextModels)
+    case .fibo2:
+      return encodeFibo2(
+        images: images, tokens: tokens, tokenLengthUncond: &tokenLengthUncond,
+        tokenLengthCond: &tokenLengthCond)
     case .flux3_5b:
       return encodeFlux3(
         tokens: tokens, tokenLengthUncond: &tokenLengthUncond, tokenLengthCond: &tokenLengthCond)
@@ -4585,7 +4788,7 @@ extension TextEncoder {
       case .sd3, .sd3Large, .pixart, .auraflow, .flux1, .kandinsky21, .sdxlBase, .sdxlRefiner,
         .ssd1b, .svdI2v, .wurstchenStageC, .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
         .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .cosmos2_5_2b, .cosmos2_5_2_9b,
         .ideogram4, .krea2, .ltx2,
         .ltx2_3,
         .seedvr2_3b,
@@ -4627,7 +4830,7 @@ extension TextEncoder {
                 case .sd3, .sd3Large, .pixart, .auraflow, .flux1, .kandinsky21, .sdxlBase,
                   .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageC, .wurstchenStageB, .hunyuanVideo,
                   .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1,
-                  .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+                  .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
                   .mossImage,
                   .cosmos2_5_2b, .cosmos2_5_2_9b,
                   .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2,
@@ -4671,7 +4874,7 @@ extension TextEncoder {
               case .sd3, .sd3Large, .pixart, .auraflow, .flux1, .kandinsky21, .sdxlBase,
                 .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageC, .wurstchenStageB, .hunyuanVideo,
                 .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1,
-                .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+                .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
                 .mossImage,
                 .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
                 .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5,
