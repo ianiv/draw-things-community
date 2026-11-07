@@ -176,10 +176,16 @@ public func UNetExtractConditions<FloatType: TensorNumeric & BinaryFloatingPoint
 {
   switch version {
   case .minimaxH3:
-    let fixedConditionCount =
-      50 * (18 + (referenceImageCount > 0 ? 6 : 0) + (referenceAudioCount > 0 ? 6 : 0)) + 4
     let prefixCount = 2 + referenceImageCount + referenceAudioCount
-    precondition(conditions.count == fixedConditionCount + prefixCount)
+    // Compressed checkpoints keep fewer blocks, so the count follows the conditions.
+    let layers = MiniMaxH3LayerCount(
+      fixedConditionCount: conditions.count - prefixCount,
+      referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount)
+    precondition(
+      conditions.count
+        == MiniMaxH3FixedConditionCount(
+          layers: layers, referenceImageCount: referenceImageCount,
+          referenceAudioCount: referenceAudioCount) + prefixCount)
     let fixedConditions = conditions[prefixCount...].map {
       let shape = $0.shape
       return DynamicGraph.Tensor<FloatType>($0)[
@@ -771,6 +777,9 @@ extension UNetFromNNC {
     var unconditionalUNet: ModelBuilderOrModel? = nil
     switch version {
     case .minimaxH3:
+      let layout = MiniMaxH3Layout.load(filePath: filePath)
+      // TeaCache and the separate-LoRA graphs only know the stock 50-block layout.
+      let usesTeaCache = isTeaCacheEnabled && layout.isStandard
       let textLength = isCfgEnabled ? max(tokenLengthUncond, tokenLengthCond) : tokenLengthCond
       let visionLength = c[0].shape[1] - textLength
       let videoLatentFrames = batchSize / (isCfgEnabled ? 2 : 1)
@@ -786,7 +795,7 @@ extension UNetFromNNC {
       tileScaleFactor = 4
       didRunLoRASeparately =
         !lora.isEmpty && rankOfLoRA > 0 && !isLoHa && runLoRASeparatelyIsPreferred
-        && canRunLoRASeparately
+        && canRunLoRASeparately && layout.isStandard
       if didRunLoRASeparately {
         configuration.keys = LoRALoader.keys(graph, of: lora.map { $0.file }, modelFile: filePath)
       }
@@ -811,16 +820,16 @@ extension UNetFromNNC {
       self.solAttentionStart = max(0, solAttentionStart)
       unet = .modelBuilder(
         ModelBuilder { eligibleForApproximation, inputs in
-          let videoFrames = isTeaCacheEnabled ? videoLatentFrames : inputs[0].shape[0]
-          let videoHeight = isTeaCacheEnabled ? tiledHeight : inputs[0].shape[1]
-          let videoWidth = isTeaCacheEnabled ? tiledWidth : inputs[0].shape[2]
+          let videoFrames = usesTeaCache ? videoLatentFrames : inputs[0].shape[0]
+          let videoHeight = usesTeaCache ? tiledHeight : inputs[0].shape[1]
+          let videoWidth = usesTeaCache ? tiledWidth : inputs[0].shape[2]
           let textLength =
-            isTeaCacheEnabled
+            usesTeaCache
             ? inputs[0].shape[1] - audioLength - videoFrames * videoHeight / 2 * (videoWidth / 2)
               - referenceImageSizes.reduce(0) { $0 + $1.height / 2 * ($1.width / 2) }
               - referenceAudioLengths.reduce(0, +)
             : inputs[2].shape[1]
-          let sequenceLength = inputs[isTeaCacheEnabled ? 1 : 3].shape[1]
+          let sequenceLength = inputs[usesTeaCache ? 1 : 3].shape[1]
           let videoLength = videoFrames * videoHeight / 2 * (videoWidth / 2)
           let solAttention: (eligibleForApproximation: Range<Int>, tau: Float)? =
             usesSolAttention
@@ -831,30 +840,30 @@ extension UNetFromNNC {
             : nil
           if usesLoRA {
             return LoRAMiniMaxH3(
-              hiddenSize: 5_376, layers: isTeaCacheEnabled ? 49 : 50,
-              startLayer: isTeaCacheEnabled ? 1 : 0,
+              hiddenSize: 5_376, layers: usesTeaCache ? 49 : 50,
+              startLayer: usesTeaCache ? 1 : 0,
               textLength: textLength, audioLength: audioLength,
               videoFrames: videoFrames, videoHeight: videoHeight, videoWidth: videoWidth,
               usesFlashAttention: valueOr(useFlashAttention, .scale1),
               usesSolAttention: solAttention,
               referenceImageSizes: referenceImageSizes,
               referenceAudioLengths: referenceAudioLengths,
-              visionLength: visionLength, outputResidual: isTeaCacheEnabled,
+              visionLength: visionLength, outputResidual: usesTeaCache,
               LoRAConfiguration: configuration
             ).1
           }
           return MiniMaxH3(
-            hiddenSize: 5_376, layers: isTeaCacheEnabled ? 49 : 50,
-            startLayer: isTeaCacheEnabled ? 1 : 0,
+            hiddenSize: 5_376, layers: layout.layers.count - (usesTeaCache ? 1 : 0),
+            startLayer: usesTeaCache ? 1 : 0,
             textLength: textLength, audioLength: audioLength,
             videoFrames: videoFrames, videoHeight: videoHeight, videoWidth: videoWidth,
             usesFlashAttention: valueOr(useFlashAttention, .scale1),
             usesSolAttention: solAttention,
             referenceImageSizes: referenceImageSizes, referenceAudioLengths: referenceAudioLengths,
-            visionLength: visionLength, outputResidual: isTeaCacheEnabled
+            visionLength: visionLength, outputResidual: usesTeaCache, layout: layout
           ).1
         })
-      if isTeaCacheEnabled {
+      if usesTeaCache {
         let reducedModel = ModelBuilderOrModel.modelBuilder(
           ModelBuilder { _, inputs in
             let textLength =
@@ -2601,7 +2610,8 @@ extension UNetFromNNC {
                   return ($0, $0)
                 })
             case .minimaxH3:
-              return [Int: Int](uniqueKeysWithValues: (0..<50).map { ($0, $0) })
+              let layers = MiniMaxH3Layout.load(filePath: filePath).layers.count
+              return [Int: Int](uniqueKeysWithValues: (0..<layers).map { ($0, $0) })
             case .kandinsky21, .svdI2v, .wurstchenStageC, .wurstchenStageB, .seedvr2_3b,
               .seedvr2_7b:
               fatalError()
@@ -3347,10 +3357,10 @@ extension UNetFromNNC {
   ) {
     switch version {
     case .minimaxH3:
-      let fixedConditionCount =
-        50 * (18 + (referenceImageCount > 0 ? 6 : 0) + (referenceAudioCount > 0 ? 6 : 0)) + 4
-      precondition(
-        inputs.count == fixedConditionCount + 3 + referenceImageCount + referenceAudioCount)
+      // Compressed checkpoints keep fewer blocks; the layer count follows the inputs.
+      _ = MiniMaxH3LayerCount(
+        fixedConditionCount: inputs.count - 3 - referenceImageCount - referenceAudioCount,
+        referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount)
       let firstInput = DynamicGraph.Tensor<FloatType>(inputs[0])
       let shape = firstInput.shape
       precondition(shape[3] == MiniMaxH3Configuration.videoChannels)
@@ -3894,10 +3904,10 @@ extension UNetFromNNC {
     guard let unet = unet else { return firstInput }
     switch version {
     case .minimaxH3:
-      let fixedConditionCount =
-        50 * (18 + (referenceImageCount > 0 ? 6 : 0) + (referenceAudioCount > 0 ? 6 : 0)) + 4
-      precondition(
-        restInputs.count == fixedConditionCount + 2 + referenceImageCount + referenceAudioCount)
+      // Compressed checkpoints keep fewer blocks; the layer count follows the inputs.
+      _ = MiniMaxH3LayerCount(
+        fixedConditionCount: restInputs.count - 2 - referenceImageCount - referenceAudioCount,
+        referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount)
       let graph = firstInput.graph
       let eligibleForApproximation = usesSolAttention && step >= solAttentionStart
       // The RF schedule repeats alpha = 1 at the clean endpoint. The reference stops before this

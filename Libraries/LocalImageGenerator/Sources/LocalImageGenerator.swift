@@ -189,6 +189,33 @@ extension LocalImageGenerator {
       break
     }
     let deviceProperties = DeviceCapability.deviceProperties
+    // HyperFlow H3 Flash is distilled for Euler steps on fixed 4, 6 and 8-step grids; any sampler
+    // the user picks runs as that.
+    if version == .minimaxH3, MiniMaxH3Layout.load(filePath: filePath).isTwoTime {
+      return DDIMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.RFSigmaGridDiscretization>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16,
+        discretization: Denoiser.RFSigmaGridDiscretization(
+          parameterization, objective: objective, grids: MiniMaxH3Layout.hyperFlowSigmaGrids),
+        weightsCache: weightsCache)
+    }
     guard version != .wurstchenStageC && version != .wurstchenStageB else {
       switch type {
       case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing:

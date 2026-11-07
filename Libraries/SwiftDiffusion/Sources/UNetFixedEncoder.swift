@@ -269,6 +269,7 @@ extension UNetFixedEncoder {
         ? .externalOnDemand : .externalData(deviceProperties.isFreadPreferred ? .fread : .mmap)
       let referenceImageCount = referenceImages.count
       let referenceAudioCount = referenceAudios.count
+      let layout = MiniMaxH3Layout.load(filePath: filePath)
       let videoLatentFrames = batchSize
       let audioHeight = MiniMaxH3AudioHeight(
         videoLatentFrames: videoLatentFrames, latentWidth: startWidth)
@@ -375,6 +376,35 @@ extension UNetFixedEncoder {
         }
       }
       let timestepFrequencies = graph.variable(Tensor<FloatType>(from: frequencies).toGPU(0))
+      // Two-time checkpoints also embed where each step lands: r = 1 - next sigma for generated
+      // rows; reference rows are anchors (r = t).
+      var endpointFrequencies = [DynamicGraph.Tensor<FloatType>]()
+      if layout.isTwoTime {
+        var endpoints = Tensor<Float>(
+          .CPU,
+          .HWC(
+            timesteps.count,
+            2 + (referenceImageCount > 0 ? 1 : 0) + (referenceAudioCount > 0 ? 1 : 0), 256))
+        for index in timesteps.indices {
+          let videoSigma = timesteps[index] / 1_000
+          let nextVideoSigma = index + 1 < timesteps.count ? timesteps[index + 1] / 1_000 : 0
+          let nextAudioSigma = MiniMaxH3AudioSigma(
+            forVideoSigma: nextVideoSigma, audioShiftRatio: audioShiftRatio)
+          let values =
+            [1 - nextVideoSigma, 1 - nextAudioSigma]
+            + (referenceImageCount > 0 ? [max(1 - videoSigma, 0.999)] : [])
+            + (referenceAudioCount > 0 ? [Float(1)] : [])
+          for (modality, timestep) in values.enumerated() {
+            endpoints[
+              index..<(index + 1), modality..<(modality + 1),
+              0..<256
+            ] = timeEmbedding(
+              timestep: timestep, batchSize: 1, embeddingSize: 256, maxPeriod: 10_000
+            ).reshaped(.HWC(1, 1, 256))
+          }
+        }
+        endpointFrequencies = [graph.variable(Tensor<FloatType>(from: endpoints).toGPU(0))]
+      }
       let references = referenceImages.map { image in
         // Augment once, then keep the projected references fixed throughout denoising.
         let noise = graph.variable(like: image)
@@ -386,9 +416,10 @@ extension UNetFixedEncoder {
       let isLoHa = lora.contains { $0.isLoHa }
       var configuration = LoRANetworkConfiguration(rank: rankOfLoRA, scale: 1, highPrecision: false)
       let runLoRASeparatelyIsPreferred = isQuantizedModel || externalOnDemand || isBF16
+      // The LoRA graphs only know the stock layout; compressed checkpoints merge LoRAs instead.
       let shouldRunLoRASeparately =
         !lora.isEmpty && !isLoHa && runLoRASeparatelyIsPreferred && rankOfLoRA > 0
-        && canRunLoRASeparately
+        && canRunLoRASeparately && layout.isStandard
       let unetFixed: Model
       if shouldRunLoRASeparately {
         configuration.keys = LoRALoader.keys(graph, of: lora.map { $0.file }, modelFile: filePath)
@@ -405,17 +436,18 @@ extension UNetFixedEncoder {
       } else {
         unetFixed =
           MiniMaxH3Fixed(
-            timesteps: timesteps.count, hiddenSize: 5_376, layers: 50,
+            timesteps: timesteps.count, hiddenSize: 5_376, layers: layout.layers.count,
             textLength: (
               isCfgEnabled ? tokenLengthUncond + visionLength : 0, tokenLengthCond + visionLength
             ),
             usesFlashAttention: valueOr(usesFlashAttention, .scale1),
             referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount,
-            visionLength: visionLength
+            visionLength: visionLength, layout: layout
           ).1
       }
       unetFixed.maxConcurrency = .limit(4)
-      unetFixed.compile(inputs: [text, timestepFrequencies] + references + referenceAudios)
+      unetFixed.compile(
+        inputs: [text, timestepFrequencies] + endpointFrequencies + references + referenceAudios)
       let suffix =
         (referenceImageCount > 0 ? ":ref" : "") + (referenceAudioCount > 0 ? ":audio-ref" : "")
       let loadedFromWeightsCache = weightsCache.detach(
@@ -425,7 +457,8 @@ extension UNetFixedEncoder {
           filePath, flags: .readOnly, externalStore: TensorData.externalStore(filePath: filePath)
         ) { store in
           LoRALoader.openStore(graph, lora: lora) { loader in
-            let mapping = Dictionary(uniqueKeysWithValues: (0..<50).map { ($0, $0) })
+            let mapping = Dictionary(
+              uniqueKeysWithValues: (0..<layout.layers.count).map { ($0, $0) })
             try! store.read(
               "dit", model: unetFixed, strict: lora.isEmpty,
               codec: [.jit, .q6p, .q8p, .i8x, .ezm7, externalData]
@@ -469,9 +502,10 @@ extension UNetFixedEncoder {
         }
       }
       let fixedConditions = unetFixed(
-        inputs: text, [timestepFrequencies] + references + referenceAudios)
-      let fixedConditionCount =
-        50 * (18 + (referenceImageCount > 0 ? 6 : 0) + (referenceAudioCount > 0 ? 6 : 0)) + 4
+        inputs: text, [timestepFrequencies] + endpointFrequencies + references + referenceAudios)
+      let fixedConditionCount = MiniMaxH3FixedConditionCount(
+        layers: layout.layers.count, referenceImageCount: referenceImageCount,
+        referenceAudioCount: referenceAudioCount)
       precondition(
         fixedConditions.count == fixedConditionCount + 1 + referenceImageCount + referenceAudioCount
       )

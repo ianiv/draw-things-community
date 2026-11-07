@@ -168,23 +168,25 @@ private func H3Attention(
   scaleFactor: Int,
   usesFlashAttention: FlashAttentionLevel, segments: [Int] = [], startIndex: Int = 0,
   usesSolAttention: (eligibleForApproximation: Range<Int>, tau: Float)? = nil,
+  ranks: MiniMaxH3Layout.Ranks = .dense, startIndices: [String: Int] = [:],
   name: String = ""
 ) -> (ModelWeightMapper, Model) {
   let x = Input()
   let rot = isRoPEEnabled ? Input() : nil
-  let toQ = Dense(
-    count: 7_168, noBias: true, name: name.isEmpty ? "q" : "\(name)_q")
-  let toK = Dense(
-    count: 7_168, noBias: true, name: name.isEmpty ? "k" : "\(name)_k")
-  let toV = Dense(
-    count: 7_168, noBias: true, name: name.isEmpty ? "v" : "\(name)_v")
+  // A factored projection is up(down(x)); its names stay distinct so partial graphs can index them.
+  func projection(_ base: String, rank: Int, count: Int) -> H3Linear {
+    let linear = H3Linear(
+      count: count, rank: rank, name: name.isEmpty ? base : "\(name)_\(base)")
+    linear.setStartIndex(base: base, startIndex: startIndex, startIndices: startIndices)
+    return linear
+  }
+  let toQ = projection("q", rank: ranks.q, count: 7_168)
+  let toK = projection("k", rank: ranks.k, count: 7_168)
+  let toV = projection("v", rank: ranks.v, count: 7_168)
   let normQ = RMSNorm(
     epsilon: 1e-5, axis: [3], name: name.isEmpty ? "norm_q" : "\(name)_norm_q")
   let normK = RMSNorm(
     epsilon: 1e-5, axis: [3], name: name.isEmpty ? "norm_k" : "\(name)_norm_k")
-  toQ.startIndex = startIndex
-  toK.startIndex = startIndex
-  toV.startIndex = startIndex
   normQ.startIndex = startIndex
   normK.startIndex = startIndex
   let qProjected = toQ(x)
@@ -228,9 +230,7 @@ private func H3Attention(
     attentionOutput = Concat(axis: 1)(outputs)
   }
   let attended = attentionOutput.reshaped([1, sequenceLength, 7_168])
-  let out = Dense(
-    count: hiddenSize, noBias: true, name: name.isEmpty ? "o" : "\(name)_o")
-  out.startIndex = startIndex
+  let out = projection("o", rank: ranks.o, count: hiddenSize)
   let projected: Model.IO
   if scaleFactor > 1 {
     projected = Float(scaleFactor) * out(attended).to(.Float32)
@@ -239,16 +239,28 @@ private func H3Attention(
   }
   let mapper: ModelWeightMapper = { format in
     var mapping = ModelWeightMapping()
+    func rotated(_ names: [String], _ indices: [Int]) -> ModelWeightElement {
+      ModelWeightElement(
+        names, interleavedIndices: isRoPEEnabled ? indices : [],
+        numberOfHeads: 56, headDimension: 128, interleavedDimension: 96)
+    }
+    // Rotary interleaving permutes output rows, which a factored projection keeps in `up`.
+    func add(_ key: String, _ linear: H3Linear, rotary: Bool) {
+      let up: ModelWeightElement =
+        rotary ? rotated([linear.up.weight.name], [0]) : [linear.up.weight.name]
+      if let down = linear.down {
+        mapping["\(key).down.weight"] = [down.weight.name]
+        mapping["\(key).up.weight"] = up
+      } else {
+        mapping["\(key).weight"] = up
+      }
+    }
     switch format {
     case .diffusers:
-      mapping["\(prefix.1).to_q.weight"] = ModelWeightElement(
-        [toQ.weight.name], interleavedIndices: isRoPEEnabled ? [0] : [],
-        numberOfHeads: 56, headDimension: 128, interleavedDimension: 96)
-      mapping["\(prefix.1).to_k.weight"] = ModelWeightElement(
-        [toK.weight.name], interleavedIndices: isRoPEEnabled ? [0] : [],
-        numberOfHeads: 56, headDimension: 128, interleavedDimension: 96)
-      mapping["\(prefix.1).to_v.weight"] = [toV.weight.name]
-      mapping["\(prefix.1).to_out.0.weight"] = [out.weight.name]
+      add("\(prefix.1).to_q", toQ, rotary: true)
+      add("\(prefix.1).to_k", toK, rotary: true)
+      add("\(prefix.1).to_v", toV, rotary: false)
+      add("\(prefix.1).to_out.0", out, rotary: false)
       mapping["\(prefix.1).norm_q.weight"] = ModelWeightElement(
         [normQ.weight.name], interleavedIndices: isRoPEEnabled ? [0] : [],
         numberOfHeads: 1, headDimension: 128, interleavedDimension: 96)
@@ -256,11 +268,15 @@ private func H3Attention(
         [normK.weight.name], interleavedIndices: isRoPEEnabled ? [0] : [],
         numberOfHeads: 1, headDimension: 128, interleavedDimension: 96)
     case .generativeModels:
-      mapping["\(prefix.0).qkv_proj.weight"] = ModelWeightElement(
-        [toQ.weight.name, toK.weight.name, toV.weight.name],
-        interleavedIndices: isRoPEEnabled ? [0, 1] : [],
-        numberOfHeads: 56, headDimension: 128, interleavedDimension: 96)
-      mapping["\(prefix.0).out_proj.weight"] = [out.weight.name]
+      if ranks.splitsQKV {
+        add("\(prefix.0).q_proj", toQ, rotary: true)
+        add("\(prefix.0).k_proj", toK, rotary: true)
+        add("\(prefix.0).v_proj", toV, rotary: false)
+      } else {
+        mapping["\(prefix.0).qkv_proj.weight"] = rotated(
+          [toQ.up.weight.name, toK.up.weight.name, toV.up.weight.name], [0, 1])
+      }
+      add("\(prefix.0).out_proj", out, rotary: false)
       mapping["\(prefix.0).q_norm.weight"] = ModelWeightElement(
         [normQ.weight.name], interleavedIndices: isRoPEEnabled ? [0] : [],
         numberOfHeads: 1, headDimension: 128, interleavedDimension: 96)
@@ -278,42 +294,115 @@ private func H3Attention(
 
 private func H3SwiGLU(
   prefix: (String, String), hiddenSize: Int, scaleFactor: Int? = nil, startIndex: Int = 0,
+  ranks: MiniMaxH3Layout.Ranks = .dense, startIndices: [String: Int] = [:],
   name: String = ""
 ) -> (ModelWeightMapper, Model) {
   let x = Input()
-  let up = Dense(
-    count: 14_336, noBias: true, name: name.isEmpty ? "up" : "\(name)_up")
-  let gate = Dense(
-    count: 14_336, noBias: true, name: name.isEmpty ? "gate" : "\(name)_gate")
-  let down = Dense(
-    count: hiddenSize, noBias: true, name: name.isEmpty ? "down" : "\(name)_down")
-  up.startIndex = startIndex
-  gate.startIndex = startIndex
-  down.startIndex = startIndex
-  let upOutput = scaleFactor.map { up((1 / Float($0)) * x) } ?? up(x)
-  let out = down(Functional.swishMul(value: upOutput, gate: gate(x))).to(.Float32)
+  func named(_ base: String) -> String { name.isEmpty ? base : "\(name)_\(base)" }
+  func dense(_ base: String, count: Int) -> Dense {
+    let dense = Dense(count: count, noBias: true, name: named(base))
+    dense.startIndex = startIndices[base] ?? startIndex
+    return dense
+  }
+  let up: Dense
+  let gate: Dense
+  let upOutput: Model.IO
+  let gateOutput: Model.IO
+  // fc1 is [gate; up]. A factored fc1 shares one `down` between the two halves of its `up`.
+  let fc1Down: Dense?
+  if ranks.fc1 > 0 {
+    let shared = dense("fc1_down", count: ranks.fc1)
+    up = dense("up_lr", count: 14_336)
+    gate = dense("gate_lr", count: 14_336)
+    let projected = shared(x)
+    upOutput = scaleFactor.map { up((1 / Float($0)) * projected) } ?? up(projected)
+    gateOutput = gate(projected)
+    fc1Down = shared
+  } else {
+    up = dense("up", count: 14_336)
+    gate = dense("gate", count: 14_336)
+    upOutput = scaleFactor.map { up((1 / Float($0)) * x) } ?? up(x)
+    gateOutput = gate(x)
+    fc1Down = nil
+  }
+  let down = H3Linear(
+    count: hiddenSize, rank: ranks.fc2, name: named("down"),
+    factoredNames: (named("fc2_down"), named("fc2_up")))
+  down.setStartIndex(
+    base: "down", startIndex: startIndex, startIndices: startIndices,
+    factoredNames: ("fc2_down", "fc2_up"))
+  let out = down(Functional.swishMul(value: upOutput, gate: gateOutput)).to(.Float32)
   let mapper: ModelWeightMapper = { format in
+    var mapping = ModelWeightMapping()
+    let fc1Key: String
+    let fc2Key: String
+    let fc1Order: [String]
     switch format {
     case .diffusers:
-      return [
-        "\(prefix.1).net.0.proj.weight": [up.weight.name, gate.weight.name],
-        "\(prefix.1).net.2.weight": [down.weight.name],
-      ]
+      fc1Key = "\(prefix.1).net.0.proj"
+      fc2Key = "\(prefix.1).net.2"
+      fc1Order = [up.weight.name, gate.weight.name]
     case .generativeModels:
-      return [
-        "\(prefix.0).fc1.weight": [gate.weight.name, up.weight.name],
-        "\(prefix.0).fc2.weight": [down.weight.name],
-      ]
+      fc1Key = "\(prefix.0).fc1"
+      fc2Key = "\(prefix.0).fc2"
+      fc1Order = [gate.weight.name, up.weight.name]
     }
+    if let fc1Down {
+      mapping["\(fc1Key).down.weight"] = [fc1Down.weight.name]
+      mapping["\(fc1Key).up.weight"] = ModelWeightElement(fc1Order)
+    } else {
+      mapping["\(fc1Key).weight"] = ModelWeightElement(fc1Order)
+    }
+    if let fc2Down = down.down {
+      mapping["\(fc2Key).down.weight"] = [fc2Down.weight.name]
+      mapping["\(fc2Key).up.weight"] = [down.up.weight.name]
+    } else {
+      mapping["\(fc2Key).weight"] = [down.up.weight.name]
+    }
+    return mapping
   }
   return (mapper, Model([x], [out]))
+}
+
+/// A bias-free linear that is either dense or factored into `up(down(x))`.
+private final class H3Linear {
+  let down: Dense?
+  let up: Dense
+  init(count: Int, rank: Int, name: String, factoredNames: (String, String)? = nil) {
+    if rank > 0 {
+      let names = factoredNames ?? ("\(name)_down", "\(name)_up")
+      down = Dense(count: rank, noBias: true, name: names.0)
+      up = Dense(count: count, noBias: true, name: names.1)
+    } else {
+      down = nil
+      up = Dense(count: count, noBias: true, name: name)
+    }
+  }
+  /// `startIndices` is keyed by the unprefixed names `MiniMaxH3Layout.linearNames` lists.
+  func setStartIndex(
+    base: String, startIndex: Int, startIndices: [String: Int],
+    factoredNames: (String, String)? = nil
+  ) {
+    if let down {
+      let names = factoredNames ?? ("\(base)_down", "\(base)_up")
+      down.startIndex = startIndices[names.0] ?? startIndex
+      up.startIndex = startIndices[names.1] ?? startIndex
+    } else {
+      up.startIndex = startIndices[base] ?? startIndex
+    }
+  }
+  func callAsFunction(_ x: Model.IO) -> Model.IO {
+    guard let down else { return up(x) }
+    return up(down(x))
+  }
 }
 
 private func H3TransformerBlock(
   prefix: (String, String), hiddenSize: Int, textLength: Int, audioLength: Int, videoLength: Int,
   conditionLength: Int, referenceAudioLength: Int,
   usesFlashAttention: FlashAttentionLevel, scaleFactor: Int?, startIndex: Int,
-  usesSolAttention: (eligibleForApproximation: Range<Int>, tau: Float)?
+  usesSolAttention: (eligibleForApproximation: Range<Int>, tau: Float)?,
+  ranks: MiniMaxH3Layout.Ranks = .dense, startIndices: [String: Int] = [:]
 ) -> (ModelWeightMapper, Model) {
   let sequenceLength =
     textLength + conditionLength + referenceAudioLength + audioLength + videoLength
@@ -341,7 +430,7 @@ private func H3TransformerBlock(
     prefix: ("\(prefix.0).attn", "\(prefix.1).attn"), hiddenSize: hiddenSize,
     sequenceLength: sequenceLength, isRoPEEnabled: true, scaleFactor: 8,
     usesFlashAttention: usesFlashAttention, startIndex: startIndex,
-    usesSolAttention: usesSolAttention)
+    usesSolAttention: usesSolAttention, ranks: ranks, startIndices: startIndices)
   let normed1 = norm1(x).to(.Float16)
   let attentionInputs = spans.map { span in
     let modality = span.modality
@@ -370,7 +459,7 @@ private func H3TransformerBlock(
   norm2.startIndex = startIndex
   let (feedForwardMapper, feedForward) = H3SwiGLU(
     prefix: ("\(prefix.0).mlp", "\(prefix.1).ff"), hiddenSize: hiddenSize, scaleFactor: scaleFactor,
-    startIndex: startIndex)
+    startIndex: startIndex, ranks: ranks, startIndices: startIndices)
   let normed2 = norm2(out).to(.Float16)
   let feedForwardInputs = spans.map { span in
     let modality = span.modality
@@ -475,10 +564,12 @@ private func H3TokenRefiner(
   return (mapper, Model([x], [out]))
 }
 
-private func H3TimestepEmbedding(prefix: String, hiddenSize: Int) -> (ModelWeightMapper, Model) {
+private func H3TimestepEmbedding(
+  prefix: String, hiddenSize: Int, outputSize: Int = 2_688, name: String = "time_embedder"
+) -> (ModelWeightMapper, Model) {
   let frequencies = Input()
-  let linear1 = Dense(count: hiddenSize, name: "time_embedder_linear_1")
-  let linear2 = Dense(count: 2_688, name: "time_embedder_linear_2")
+  let linear1 = Dense(count: hiddenSize, name: "\(name)_linear_1")
+  let linear2 = Dense(count: outputSize, name: "\(name)_linear_2")
   let out = linear2(linear1(frequencies).swish())
   let mapper: ModelWeightMapper = { format in
     switch format {
@@ -505,9 +596,10 @@ public func MiniMaxH3Fixed(
   timesteps: Int, hiddenSize: Int, layers: Int, textLength: (Int, Int),
   usesFlashAttention: FlashAttentionLevel, referenceImageCount: Int = 0,
   referenceAudioCount: Int = 0,
-  visionLength: Int = 0
+  visionLength: Int = 0, layout: MiniMaxH3Layout = .standard
 ) -> (ModelWeightMapper, Model) {
   precondition(timesteps > 0 && hiddenSize > 0 && layers > 0)
+  precondition(layers == layout.layers.count)
   precondition(textLength.0 >= 0 && textLength.1 > 0)
   let text = Input()
   let referenceImages = (0..<referenceImageCount).map { _ in Input() }
@@ -570,9 +662,25 @@ public func MiniMaxH3Fixed(
   }
   let timestepFrequencies = Input()
   let (timeMapper, timeEmbedding) = H3TimestepEmbedding(
-    prefix: "time_embedder", hiddenSize: hiddenSize)
+    prefix: "time_embedder", hiddenSize: hiddenSize, outputSize: layout.timeEmbeddingSize)
   mappers.append(timeMapper)
-  let activatedTimestep = timeEmbedding(timestepFrequencies).swish()
+  let endpointFrequencies: Input?
+  let activatedTimestep: Model.IO
+  if let gate = layout.endpointGate {
+    // HyperFlow conditions every row on its step endpoint r too:
+    // temb = emb_t(t) + gate * (emb_r(r) - emb_t(t)), before the SiLU the AdaLN projections apply.
+    let endpoint = Input()
+    let (endpointMapper, endpointEmbedding) = H3TimestepEmbedding(
+      prefix: "endpoint_time_embedder", hiddenSize: hiddenSize,
+      outputSize: layout.timeEmbeddingSize, name: "endpoint_embedder")
+    mappers.append(endpointMapper)
+    let current = timeEmbedding(timestepFrequencies)
+    activatedTimestep = ((1 - gate) * current + gate * endpointEmbedding(endpoint)).swish()
+    endpointFrequencies = endpoint
+  } else {
+    activatedTimestep = timeEmbedding(timestepFrequencies).swish()
+    endpointFrequencies = nil
+  }
   let timestepCount = 2 + (referenceImages.isEmpty ? 0 : 1) + (referenceAudios.isEmpty ? 0 : 1)
   var outputs = [context]
   if !referenceImages.isEmpty {
@@ -610,7 +718,7 @@ public func MiniMaxH3Fixed(
       }
     }
   }
-  for i in 0..<layers {
+  for layer in layout.layers {
     var projections = [Model]()
     for chunk in 0..<6 {
       var conditions = [Model.IO]()
@@ -649,16 +757,17 @@ public func MiniMaxH3Fixed(
       switch format {
       case .diffusers:
         return [
-          "transformer_blocks.\(i).adaln_proj.linear.weight": ModelWeightElement(
+          "transformer_blocks.\(layer).adaln_proj.linear.weight": ModelWeightElement(
             ordered.map { $0.weight.name }),
-          "transformer_blocks.\(i).adaln_proj.linear.bias": ModelWeightElement(
+          "transformer_blocks.\(layer).adaln_proj.linear.bias": ModelWeightElement(
             ordered.map { $0.bias.name }),
         ]
       case .generativeModels:
         return [
-          "blocks.\(i).adaln_proj.linear.weight": ModelWeightElement(
+          "blocks.\(layer).adaln_proj.linear.weight": ModelWeightElement(
             ordered.map { $0.weight.name }),
-          "blocks.\(i).adaln_proj.linear.bias": ModelWeightElement(ordered.map { $0.bias.name }),
+          "blocks.\(layer).adaln_proj.linear.bias": ModelWeightElement(
+            ordered.map { $0.bias.name }),
         ]
       }
     }
@@ -706,7 +815,12 @@ public func MiniMaxH3Fixed(
     }
     return mapping
   }
-  return (mapper, Model([text, timestepFrequencies] + referenceImages + referenceAudios, outputs))
+  return (
+    mapper,
+    Model(
+      [text, timestepFrequencies] + (endpointFrequencies.map { [$0] } ?? []) + referenceImages
+        + referenceAudios, outputs)
+  )
 }
 
 /// Sol is opt-in. Global transformer layers
@@ -719,9 +833,10 @@ public func MiniMaxH3(
   usesSolAttention: (eligibleForApproximation: Range<Int>, tau: Float)? = nil,
   referenceImageSizes: [(height: Int, width: Int)] = [], referenceAudioLengths: [Int] = [],
   visionLength: Int = 0,
-  outputResidual: Bool = false, inputResidual: Bool = false
+  outputResidual: Bool = false, inputResidual: Bool = false, layout: MiniMaxH3Layout = .standard
 ) -> (ModelWeightMapper, Model) {
   precondition(hiddenSize > 0 && layers >= 0 && startLayer >= 0)
+  precondition(startLayer + layers <= layout.layers.count)
   precondition(startLayer > 0 || layers > 0)
   precondition(!inputResidual || (startLayer > 0 && layers == 0))
   precondition(videoHeight % 2 == 0 && videoWidth % 2 == 0)
@@ -810,7 +925,9 @@ public func MiniMaxH3(
     outputType = rot
   }
   let embedded = out
-  for layer in startLayer..<(startLayer + layers) {
+  for position in startLayer..<(startLayer + layers) {
+    // `position` counts kept blocks; `layer` is the block's index in the uncompressed model.
+    let layer = layout.layers[position]
     // Keep FFN outliers in FP16 range; the residual branch restores the factor in FP32.
     let scaleFactor: Int
     switch layer {
@@ -837,10 +954,17 @@ public func MiniMaxH3(
       videoLength: visionLength + videoLength, conditionLength: conditionLength,
       referenceAudioLength: referenceAudioLength,
       usesFlashAttention: usesFlashAttention,
-      scaleFactor: scaleFactor, startIndex: startLayer,
-      usesSolAttention: [0, 1, 33, 34, 35].contains(layer) ? nil : usesSolAttention)
+      scaleFactor: scaleFactor, startIndex: layout.isStandard ? startLayer : position,
+      usesSolAttention: [0, 1, 33, 34, 35].contains(layer) ? nil : usesSolAttention,
+      ranks: layout.ranks(ofLayer: layer),
+      startIndices: layout.isStandard
+        ? [:]
+        : Dictionary(
+          uniqueKeysWithValues: layout.linearNames(atPosition: position).map {
+            ($0, layout.occurrence(of: $0, atPosition: position))
+          }))
     mappers.append(mapper)
-    let conditionOffset = (layer - startLayer) * perLayerConditions
+    let conditionOffset = (position - startLayer) * perLayerConditions
     out =
       block(
         [out, rot]

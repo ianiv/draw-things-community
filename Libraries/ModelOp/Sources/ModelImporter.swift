@@ -252,6 +252,8 @@ public final class ModelImporter {
     let isDiffusersFormat: Bool
     let expectedTotalAccess: Int
     var distilledGuidanceLayers: Int = 0
+    // Compressed H3 checkpoints (HyperFlow H3 Flash) drop blocks and factor linears.
+    var h3Layout = MiniMaxH3Layout.standard
     // This is for SD v1, v2 and SDXL.
     if let tokey = stateDict[
       "model.diffusion_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight"]
@@ -529,7 +531,8 @@ public final class ModelImporter {
       modifier =
         (filePath as NSString).lastPathComponent.lowercased().contains("ref2va") ? .ref2va : .fl2va
       inputDim = 24
-      expectedTotalAccess = 2_710
+      h3Layout = MiniMaxH3LayoutFromStateDict(stateDict)
+      expectedTotalAccess = h3Layout.isStandard ? 2_710 : stateDict.count
       isDiffusersFormat = stateDict.keys.contains {
         $0.contains("token_refiner.refiner_blocks.")
       }
@@ -946,7 +949,7 @@ public final class ModelImporter {
             graph.variable(.CPU, .HWC(1, 2, 5_376), of: FloatType.self),
             graph.variable(.CPU, .NHWC(1, 1_030, 1, 128), of: FloatType.self),
           ]
-          + (0..<(50 * 18 + 4)).map { _ in
+          + (0..<(h3Layout.layers.count * 18 + 4)).map { _ in
             graph.variable(.CPU, .HWC(1, 1, 5_376), of: FloatType.self)
           }
       case .longcatVideoAvatar1_5:
@@ -1262,11 +1265,12 @@ public final class ModelImporter {
           usesFlashAttention: .scale1)
       case .minimaxH3:
         (unetMapper, unet) = MiniMaxH3(
-          hiddenSize: 5_376, layers: 50, textLength: 2, audioLength: 4, videoFrames: 1,
-          videoHeight: 64, videoWidth: 64, usesFlashAttention: .scale1)
+          hiddenSize: 5_376, layers: h3Layout.layers.count, textLength: 2, audioLength: 4,
+          videoFrames: 1, videoHeight: 64, videoWidth: 64, usesFlashAttention: .scale1,
+          layout: h3Layout)
         (unetFixedMapper, unetFixed) = MiniMaxH3Fixed(
-          timesteps: 1, hiddenSize: 5_376, layers: 50, textLength: (0, 2),
-          usesFlashAttention: .scale1)
+          timesteps: 1, hiddenSize: 5_376, layers: h3Layout.layers.count, textLength: (0, 2),
+          usesFlashAttention: .scale1, layout: h3Layout)
       case .longcatVideoAvatar1_5:
         (unetMapper, unet) = LongCatVideoAvatar(
           time: 1, height: 64, width: 64, channels: 4_096, layers: 48, intermediateSize: 11_008,
@@ -1578,10 +1582,12 @@ public final class ModelImporter {
         ]
         tEmb = nil
       case .minimaxH3:
-        crossattn = [
-          graph.variable(.CPU, .HWC(1, 2, 5_120), of: FloatType.self),
-          graph.variable(.CPU, .HWC(1, 2, 256), of: FloatType.self),
-        ]
+        crossattn =
+          [
+            graph.variable(.CPU, .HWC(1, 2, 5_120), of: FloatType.self),
+            graph.variable(.CPU, .HWC(1, 2, 256), of: FloatType.self),
+          ]
+          + (h3Layout.isTwoTime ? [graph.variable(.CPU, .HWC(1, 2, 256), of: FloatType.self)] : [])
         tEmb = nil
       case .longcatVideoAvatar1_5:
         crossattn = [
@@ -2116,6 +2122,17 @@ public final class ModelImporter {
                 store.write("cap_pad_token", tensor: tensor)
               }
             }
+            if modelVersion == .minimaxH3 && !h3Layout.isStandard {
+              var layout = h3Layout
+              // The gate is stored as a one-element tensor next to the endpoint embedder.
+              if layout.isTwoTime, let gateDescriptor = stateDict["hyperflow_gate"] {
+                try archive.with(gateDescriptor) { tensor in
+                  let gate = Tensor<Float>(from: tensor)
+                  layout.endpointGate = gate[0]
+                }
+              }
+              layout.write(to: store)
+            }
             var consumed = Set<String>()
             for (key, value) in UNetMapping.sorted(by: { $0.key < $1.key }) {
               guard let _ = stateDict[key], !consumed.contains(key) else {
@@ -2350,7 +2367,7 @@ public final class ModelImporter {
             throw Error.tensorWritesFailed
           }
         case .minimaxH3:
-          if $0.keys.count != 2_392 {
+          if h3Layout.isStandard && $0.keys.count != 2_392 {
             throw Error.tensorWritesFailed
           }
         case .longcatVideoAvatar1_5:
@@ -3168,4 +3185,49 @@ extension ModelImporter {
 
     return (specification, additionalModels, wurstchenStageCEffNetAndPreviewer)
   }
+}
+
+/// Reads the block layout of an H3 checkpoint from its tensor names and shapes: which blocks are
+/// present, which linears are stored as `down` / `up` pairs, the time embedding width, and
+/// whether there is an endpoint embedder (two-time HyperFlow checkpoints).
+func MiniMaxH3LayoutFromStateDict(_ stateDict: [String: TensorDescriptor]) -> MiniMaxH3Layout {
+  var shapes = [String: [Int]]()
+  for (key, value) in stateDict {
+    if key.hasPrefix("model.diffusion_model.") {
+      shapes[String(key.dropFirst(22))] = value.shape
+    } else if key.hasPrefix("model.") {
+      shapes[String(key.dropFirst(6))] = value.shape
+    } else {
+      shapes[key] = value.shape
+    }
+  }
+  let isDiffusers = shapes.keys.contains { $0.hasPrefix("transformer_blocks.") }
+  let blockPrefix = isDiffusers ? "transformer_blocks." : "blocks."
+  var layers = Set<Int>()
+  for key in shapes.keys where key.hasPrefix(blockPrefix) {
+    let rest = key.dropFirst(blockPrefix.count)
+    if let dot = rest.firstIndex(of: "."), let index = Int(rest[..<dot]) {
+      layers.insert(index)
+    }
+  }
+  func rank(_ layer: Int, _ generativeModels: String, _ diffusers: String) -> Int {
+    let name = isDiffusers ? diffusers : generativeModels
+    return shapes["\(blockPrefix)\(layer).\(name).down.weight"]?[0] ?? 0
+  }
+  var ranks = [Int: MiniMaxH3Layout.Ranks]()
+  for layer in layers {
+    ranks[layer] = MiniMaxH3Layout.Ranks(
+      q: rank(layer, "attn.q_proj", "attn.to_q"), k: rank(layer, "attn.k_proj", "attn.to_k"),
+      v: rank(layer, "attn.v_proj", "attn.to_v"), o: rank(layer, "attn.out_proj", "attn.to_out.0"),
+      fc1: rank(layer, "mlp.fc1", "ff.net.0.proj"), fc2: rank(layer, "mlp.fc2", "ff.net.2"))
+  }
+  let timeEmbeddingSize =
+    shapes["time_embedder.proj_out.weight"]?[0] ?? shapes["time_embedder.linear_2.weight"]?[0]
+    ?? 2_688
+  let isTwoTime =
+    shapes["endpoint_time_embedder.proj_in.weight"] != nil
+    || shapes["endpoint_time_embedder.linear_1.weight"] != nil
+  return MiniMaxH3Layout(
+    layers: layers.sorted(), ranks: ranks, timeEmbeddingSize: timeEmbeddingSize,
+    endpointGate: isTwoTime ? 0.25 : nil)
 }
