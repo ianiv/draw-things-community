@@ -576,6 +576,9 @@ public final class ModelImporter {
     let qkNorm = inspectionResult.qkNorm
     let dualAttentionLayers = inspectionResult.dualAttentionLayers
     let distilledGuidanceLayers = inspectionResult.distilledGuidanceLayers
+    // Compressed H3 checkpoints (HyperFlow H3 Flash) drop blocks and factor linears.
+    let h3Layout =
+      modelVersion == .minimaxH3 ? MiniMaxH3LayoutFromStateDict(stateDict) : .standard
     expectedTotalAccess = inspectionResult.numberOfTensors
     versionCheck(modelVersion)
     progress?(0.05)

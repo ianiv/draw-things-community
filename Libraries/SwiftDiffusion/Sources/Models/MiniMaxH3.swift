@@ -239,7 +239,7 @@ private func H3Attention(
   }
   let mapper: ModelWeightMapper = { format in
     var mapping = ModelWeightMapping()
-    func rotated(_ names: [String], _ indices: [Int]) -> ModelWeightElement {
+    func rotated(_ names: [String], _ indices: Set<Int>) -> ModelWeightElement {
       ModelWeightElement(
         names, interleavedIndices: isRoPEEnabled ? indices : [],
         numberOfHeads: 56, headDimension: 128, interleavedDimension: 96)
