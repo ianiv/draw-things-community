@@ -386,11 +386,15 @@ struct Converter: ParsableCommand {
           write(
             "__text_model__[t-post_attention_layernorm-\(layer)-0]",
             try read("\(prefix).post_attention_layernorm.weight"))
+          // The MLP is a nested model named "mlp", so its weights carry the layer in the model part.
           write(
-            "__text_model__[t-mlp_gate_proj-\(layer)-0]", try read("\(prefix).mlp.gate_proj.weight"))
-          write("__text_model__[t-mlp_up_proj-\(layer)-0]", try read("\(prefix).mlp.up_proj.weight"))
+            "__text_model__[t-mlp-\(layer)-mlp_gate_proj-0-0]",
+            try read("\(prefix).mlp.gate_proj.weight"))
           write(
-            "__text_model__[t-mlp_down_proj-\(layer)-0]", try read("\(prefix).mlp.down_proj.weight"))
+            "__text_model__[t-mlp-\(layer)-mlp_up_proj-0-0]", try read("\(prefix).mlp.up_proj.weight"))
+          write(
+            "__text_model__[t-mlp-\(layer)-mlp_down_proj-0-0]",
+            try read("\(prefix).mlp.down_proj.weight"))
         }
         // Vision tower: 24 blocks, 16 heads of 64, under its Hugging Face names.
         let visual = "model.visual"
