@@ -2530,8 +2530,9 @@ public final class ModelImporter {
             throw Error.tensorWritesFailed
           }
         case .fibo2:
-          // TODO: pin the written key count after the first import.
-          break
+          if $0.keys.count != 1_059 {
+            throw Error.tensorWritesFailed
+          }
         case .flux3_5b:
           // The base model doesn't have the next timestep embedder.
           if $0.keys.count != 415 && $0.keys.count != 413 {
