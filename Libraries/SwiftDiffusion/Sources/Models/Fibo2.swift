@@ -252,7 +252,11 @@ public func Fibo2(
   let crossGates = injectionLayers.map { _ in Input() }
   let reference: Input? = referenceSequenceLength > 0 ? Input() : nil
   let blockCount = 2 + layers
-  let cleanChunks = (0..<blockCount).map { _ in (0..<4).map { _ in Input() } }
+  // The noise refiner only uses clean chunks for the context tokens, so without images to edit
+  // they are not inputs.
+  let cleanChunks = (0..<blockCount).map { i in
+    i < 2 && referenceSequenceLength == 0 ? [] : (0..<4).map { _ in Input() }
+  }
   let noisyChunks = (0..<blockCount).map { _ in (0..<4).map { _ in Input() } }
   let finalScale = Input()
   let h = height / 2
@@ -514,7 +518,10 @@ public func Fibo2Fixed<FloatType: TensorNumeric & BinaryFloatingPoint>(
       chunks[3] = chunks[3].tanh().to(.Float32)
       return chunks
     }
-    cleanChunks += chunks(cleanEmbed)
+    // The noise refiner's clean chunks are only for the context tokens.
+    if i >= 2 || !referenceSizes.isEmpty {
+      cleanChunks += chunks(cleanEmbed)
+    }
     noisyChunks += chunks(noisyEmbed)
     mappers.append { _ in
       var mapping = ModelWeightMapping()
@@ -564,7 +571,7 @@ public func Fibo2FixedOutputShapes(
   if referenceSequenceLength > 0 {
     outs.append(TensorShape([1, referenceSequenceLength, 2 * 2 * 32]))
   }
-  for _ in 0..<((2 + layers) * 4) {
+  for _ in 0..<(((referenceSequenceLength > 0 ? 2 : 0) + layers) * 4) {
     outs.append(TensorShape([1, 1, channels]))
   }
   for _ in 0..<((2 + layers) * 4 + 1) {
