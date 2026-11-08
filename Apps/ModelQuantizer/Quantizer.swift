@@ -26,6 +26,13 @@ struct Quantizer: ParsableCommand {
   @Option(name: .shortAndLong, help: "The output file after conversion")
   var outputFile: String
 
+  @Flag(
+    help: """
+      Quantize a text encoder instead of a diffusion model: its projections become q8p and its
+      token embeddings and vision tower stay FP16, as in Draw Things' own Qwen3-VL 8-bit file.
+      """)
+  var textEncoder = false
+
   mutating func run() throws {
     // Convert string to ModelVersion enum
     guard let version = ModelVersion(rawValue: modelVersion) else {
@@ -50,6 +57,18 @@ struct Quantizer: ParsableCommand {
           let fp16 = Tensor<FloatType>(from: tensor)
           let shape = fp16.shape
           let squeezedDims = shape.reduce(0) { $1 > 1 ? 1 + $0 : $0 }
+          if textEncoder {
+            // Embeddings are a lookup, and the vision tower is small and reads pixels, so both
+            // stay FP16. Norms only get compressed.
+            if key.contains("tok_embeddings") || key.hasPrefix("__vision_model__") {
+              $0.write(key, tensor: fp16)
+            } else if squeezedDims > 1 {
+              $0.write(key, tensor: fp16, codec: [.q8p, .ezm7])
+            } else {
+              $0.write(key, tensor: fp16, codec: .ezm7)
+            }
+            continue
+          }
           switch version {
           case .v1, .v2, .ssd1b, .svdI2v, .sdxlBase, .sdxlRefiner, .wurstchenStageB, .kandinsky21:
             if key.contains("visual_proj") || key.contains("encoder_hid_proj") {
