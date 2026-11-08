@@ -2467,8 +2467,18 @@ extension UNetFromNNC {
     let externalData: DynamicGraph.Store.Codec =
       externalOnDemand
       ? .externalOnDemand : .externalData(deviceProperties.isFreadPreferred ? .fread : .mmap)
-    let loadedFromWeightsCache = weightsCache.detach(
-      filePath + teaCacheConfiguration.suffix(for: version), to: unet.unwrapped.parameters)
+    let weightsCacheKey = filePath + teaCacheConfiguration.suffix(for: version)
+    // Merging LoRAs hands back float tensors (`.final`) for the weights they touch, which are
+    // copied into the existing parameters. Cached parameters of an 8-bit model loaded with `.jit`
+    // stay quantized, so that copy asserts in ccv_nnc_data_transfer on mismatched element sizes.
+    // ModelPreloader only caches runs without LoRAs or with LoRAs run separately; match that here
+    // and drop the entry rather than keep a second copy of the weights resident while reloading.
+    let mergesLoRA = !lora.isEmpty && version != .kandinsky21 && !didRunLoRASeparately
+    if mergesLoRA {
+      _ = weightsCache.remove(at: weightsCacheKey)
+    }
+    let loadedFromWeightsCache =
+      !mergesLoRA && weightsCache.detach(weightsCacheKey, to: unet.unwrapped.parameters)
 
     func shouldOffload(name: String) -> Bool {
       guard externalOnDemandPartially else {
