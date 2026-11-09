@@ -1288,7 +1288,7 @@ public enum LoRAImporter {
 
   public static func `import`(
     downloadedFile: String, name: String, filename: String, scaleFactor: Double,
-    forceVersion: ModelVersion?, progress: (Float) -> Void
+    forceVersion: ModelVersion?, outputDirectory: String? = nil, progress: (Float) -> Void
   ) throws -> (ModelVersion, Bool, Int, Bool) {
     let filePath =
       downloadedFile.starts(with: "/")
@@ -1943,7 +1943,11 @@ public enum LoRAImporter {
     var didImportTIEmbedding = false
     var textEmbeddingLength = 0
     var isLoHa = false
-    try graph.openStore(LoRAZoo.filePathForModelDownloaded(filename)) { store in
+    // `outputDirectory`, when given, is where the converted file goes instead of LoRAZoo's folder.
+    let outputPath =
+      outputDirectory.map { URL(fileURLWithPath: $0).appendingPathComponent(filename).path }
+      ?? LoRAZoo.filePathForModelDownloaded(filename)
+    try graph.openStore(outputPath) { store in
       store.removeAll()
       switch modelVersion {
       case .longcatVideoAvatar1_5, .fibo2:

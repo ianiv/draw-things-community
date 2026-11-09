@@ -20,14 +20,17 @@ public final class ModelImporter {
   private let autoencoderFilePath: String?
   private let textEncoderFilePath: String?
   private let textEncoder2FilePath: String?
+  /// The folder converted files are written to; nil writes where ModelZoo puts a new file.
+  private let outputDirectory: String?
   private var access: Int = 0
   private var expectedTotalAccess: Int = 0
   private var progress: ((Float) -> Void)? = nil
   public init(
     filePath: String, modelName: String, isTextEncoderCustomized: Bool,
     autoencoderFilePath: String?, textEncoderFilePath: String?,
-    textEncoder2FilePath: String?
+    textEncoder2FilePath: String?, outputDirectory: String? = nil
   ) {
+    self.outputDirectory = outputDirectory
     self.filePath = filePath
     self.modelName = modelName
     self.isTextEncoderCustomized = isTextEncoderCustomized
@@ -45,6 +48,13 @@ public final class ModelImporter {
     defer { Interpreter.inflateInterrupter = nil }
     self.access = 0
     return try self.internalImport(versionCheck: versionCheck)
+  }
+
+  /// Where the converted file `name` goes: `outputDirectory` if set, else
+  /// `ModelZoo.filePathForModelDownloaded(name)`.
+  private func outputFilePath(_ name: String) -> String {
+    guard let outputDirectory else { return ModelZoo.filePathForModelDownloaded(name) }
+    return URL(fileURLWithPath: outputDirectory).appendingPathComponent(name).path
   }
 
   private func interrupt() -> Bool {
@@ -682,14 +692,14 @@ public final class ModelImporter {
               vocabularySize: 49408, maxLength: 77, maxTokenLength: 77, embeddingSize: 768,
               numLayers: 12, numHeads: 12,
               batchSize: 2, intermediateSize: 3072, usesFlashAttention: false)
-            filePath = ModelZoo.filePathForModelDownloaded("\(modelName)_clip_vit_l14_f16.ckpt")
+            filePath = outputFilePath("\(modelName)_clip_vit_l14_f16.ckpt")
           case .v2:
             (textModel, textModelReader) = OpenCLIPTextModel(
               FloatType.self, injectEmbeddings: false,
               vocabularySize: 49408, maxLength: 77, maxTokenLength: 77, embeddingSize: 1024,
               numLayers: 23, numHeads: 16,
               batchSize: 2, intermediateSize: 4096, usesFlashAttention: false)
-            filePath = ModelZoo.filePathForModelDownloaded(
+            filePath = outputFilePath(
               "\(modelName)_open_clip_vit_h14_f16.ckpt")
           case .sdxlRefiner:
             (textModel, textModelReader) = OpenCLIPTextModel(
@@ -697,7 +707,7 @@ public final class ModelImporter {
               vocabularySize: 49408, maxLength: 77, maxTokenLength: 77, embeddingSize: 1280,
               numLayers: 32, numHeads: 20, batchSize: 2,
               intermediateSize: 5120, usesFlashAttention: false, outputPenultimate: true)
-            filePath = ModelZoo.filePathForModelDownloaded(
+            filePath = outputFilePath(
               "\(modelName)_open_clip_vit_bigg14_f16.ckpt")
           case .sd3, .sd3Large, .pixart, .auraflow, .flux1, .kandinsky21, .svdI2v, .wurstchenStageC,
             .wurstchenStageB, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1,
@@ -764,7 +774,7 @@ public final class ModelImporter {
               vocabularySize: 49408, maxLength: 77, maxTokenLength: 77, embeddingSize: 1280,
               numLayers: 32, numHeads: 20, batchSize: 2,
               intermediateSize: 5120, usesFlashAttention: false, outputPenultimate: true)
-            filePath = ModelZoo.filePathForModelDownloaded(
+            filePath = outputFilePath(
               "\(modelName)_open_clip_vit_bigg14_f16.ckpt")
             var textEncoder2StateDict = stateDict
             var textEncoder2Archive: TensorArchive = archive
@@ -955,7 +965,7 @@ public final class ModelImporter {
       let unet: Model
       var unetReader: PythonReader?
       let unetMapper: ModelWeightMapper?
-      let filePath = ModelZoo.filePathForModelDownloaded("\(self.modelName)_f16.ckpt")
+      let filePath = outputFilePath("\(self.modelName)_f16.ckpt")
       switch modelVersion {
       case .mossImage:
         // The refined text and the modulations are in FP32, they are appended when compiling.
@@ -2627,7 +2637,7 @@ public final class ModelImporter {
             usesFlashAttention: false, paddingFinalConvLayer: false, format: .NHWC)
           decoder.compile(inputs: decoderTensor)
           encoder.compile(inputs: encoderTensor)
-          let filePath = ModelZoo.filePathForModelDownloaded("\(modelName)_vae_f16.ckpt")
+          let filePath = outputFilePath("\(modelName)_vae_f16.ckpt")
           // This is the name of diffusers.
           if stateDict.keys.contains(where: { $0.contains(".mid_block.") }) {
             // For diffusers, we use the weight mapper.
