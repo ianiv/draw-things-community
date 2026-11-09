@@ -38,15 +38,48 @@ public func MOSSImageRotaryPositionEmbedding(
   return rotTensor
 }
 
+/// Rotary embedding for the reference images (editing), one after another: the reference's index
+/// from 1 on the first axis, 0 on the text axis and centered coordinates on the y / x axes. Sizes
+/// are in patches.
+public func MOSSImageReferenceRotaryPositionEmbedding(sizes: [(height: Int, width: Int)])
+  -> Tensor<Float>
+{
+  let length = sizes.reduce(0) { $0 + $1.height * $1.width }
+  var rotTensor = Tensor<Float>(.CPU, .NHWC(1, length, 1, 128))
+  var i = 0
+  for (n, size) in sizes.enumerated() {
+    for y in 0..<size.height {
+      for x in 0..<size.width {
+        let positions = [
+          Double(n + 1), 0, Double(y) - Double(size.height - 1) / 2,
+          Double(x) - Double(size.width - 1) / 2,
+        ]
+        for (axis, position) in positions.enumerated() {
+          for k in 0..<16 {
+            let theta = position / pow(10_000, Double(k) / 16)
+            rotTensor[0, i, 0, (k + axis * 16) * 2] = Float(cos(theta))
+            rotTensor[0, i, 0, (k + axis * 16) * 2 + 1] = Float(sin(theta))
+          }
+        }
+        i += 1
+      }
+    }
+  }
+  return rotTensor
+}
+
 // 4 * tanh(gate / 4) * sigmoid(gate) * 25 * tanh(hidden / 25), both factors are soft capped.
 private func MOSSImageSiTU(_ hidden: Model.IO, _ gate: Model.IO) -> Model.IO {
   return (gate.tanh(softCap: 4) .* gate.sigmoid()) .* hidden.tanh(softCap: 25)
 }
 
+/// `t` is the query length and `tk` the key / value length (`t` when nil): when editing, image and
+/// text queries attend to the reference tokens too.
 private func MOSSImageAttention(
-  queries: Model.IO, keys: Model.IO, values: Model.IO, b: Int, t: Int, h: Int, k: Int,
-  usesFlashAttention: FlashAttentionLevel
+  queries: Model.IO, keys: Model.IO, values: Model.IO, b: Int, t: Int, tk: Int? = nil, h: Int,
+  k: Int, usesFlashAttention: FlashAttentionLevel
 ) -> Model.IO {
+  let tk = tk ?? t
   var queries = queries
   var keys = keys
   var values = values
@@ -58,25 +91,25 @@ private func MOSSImageAttention(
     if b * h <= 256 {
       var outs = [Model.IO]()
       for i in 0..<(b * h) {
-        let key = keys.reshaped([1, t, k], offset: [i, 0, 0], strides: [t * k, k, 1])
+        let key = keys.reshaped([1, tk, k], offset: [i, 0, 0], strides: [tk * k, k, 1])
         let query = queries.reshaped([1, t, k], offset: [i, 0, 0], strides: [t * k, k, 1])
-        let value = values.reshaped([1, t, k], offset: [i, 0, 0], strides: [t * k, k, 1])
+        let value = values.reshaped([1, tk, k], offset: [i, 0, 0], strides: [tk * k, k, 1])
         var dot = Matmul(transposeB: (1, 2))(query, key)
         if let last = outs.last {
           dot.add(dependencies: [last])
         }
-        dot = dot.reshaped([t, t])
+        dot = dot.reshaped([t, tk])
         dot = dot.softmax()
-        dot = dot.reshaped([1, t, t])
+        dot = dot.reshaped([1, t, tk])
         outs.append(dot * value)
       }
       let out = Concat(axis: 0)(outs)
       return out.reshaped([b, h, t, k]).transposed(1, 2).reshaped([b, t, h * k])
     } else {
       var dot = Matmul(transposeB: (2, 3))(queries, keys)
-      dot = dot.reshaped([b * h * t, t])
+      dot = dot.reshaped([b * h * t, tk])
       dot = dot.softmax()
-      dot = dot.reshaped([b, h, t, t])
+      dot = dot.reshaped([b, h, t, tk])
       let out = dot * values
       return out.reshaped([b, h, t, k]).transposed(1, 2).reshaped([b, t, h * k])
     }
@@ -168,7 +201,7 @@ private func MOSSImageTextBlock<T: TensorNumeric>(
 
 private func MOSSImageBlock<T: TensorNumeric>(
   _ dataType: T.Type, prefix: String, k: Int, h: Int, b: Int, t: Int, outputLength: Int,
-  intermediateSize: Int, usesFlashAttention: FlashAttentionLevel
+  referenceLength tr: Int, intermediateSize: Int, usesFlashAttention: FlashAttentionLevel
 ) -> (ModelWeightMapper, Model) {
   let x = Input()
   let rot = Input()
@@ -186,8 +219,17 @@ private func MOSSImageBlock<T: TensorNumeric>(
   let values = toValues(xOut).reshaped([b, t, h, k])
   queries = Functional.cmul(left: queries, right: rot)
   keys = Functional.cmul(left: keys, right: rot)
+  // When editing, image and text tokens attend to the reference tokens as well, whose keys (with
+  // their rotary embedding) and values come from `MOSSImageFixed`.
+  let referenceKeys = Input()
+  let referenceValues = Input()
+  var allValues = values
+  if tr > 0 {
+    keys = Functional.concat(axis: 1, keys, referenceKeys)
+    allValues = Functional.concat(axis: 1, values, referenceValues)
+  }
   var out = MOSSImageAttention(
-    queries: queries, keys: keys, values: values, b: b, t: t, h: h, k: k,
+    queries: queries, keys: keys, values: allValues, b: b, t: t, tk: t + tr, h: h, k: k,
     usesFlashAttention: usesFlashAttention)
   var xIn: Model.IO = x
   if outputLength < t {
@@ -222,16 +264,61 @@ private func MOSSImageBlock<T: TensorNumeric>(
     mapping["\(prefix).proj.ffn_down.weight"] = [ffnDown.weight.name]
     return mapping
   }
-  return (mapper, Model([x, rot] + chunks, [out]))
+  return (
+    mapper,
+    Model([x, rot] + chunks + (tr > 0 ? [referenceKeys, referenceValues] : []), [out])
+  )
+}
+
+/// A block of the reference tokens (editing) alone, with the same weights as `MOSSImageBlock`:
+/// they attend only to each other, at timestep 0. Outputs the tokens for the next block (unless
+/// `outputsTokens` is false, for the last one), then the keys (with the rotary embedding) and values
+/// the image and text tokens attend to.
+private func MOSSImageReferenceBlock<T: TensorNumeric>(
+  _ dataType: T.Type, k: Int, h: Int, b: Int, t: Int, outputsTokens: Bool, intermediateSize: Int,
+  usesFlashAttention: FlashAttentionLevel
+) -> Model {
+  let x = Input()
+  let rot = Input()
+  let chunks = (0..<6).map { _ in Input() }
+  let norm1 = RMSNorm(epsilon: 1e-6, axis: [2], name: "x_norm1")
+  let xOut = (norm1(x) .* chunks[1] + chunks[0]).to(T.dataType)
+  let toKeys = Dense(count: k * h, noBias: true, name: "x_k")
+  let toValues = Dense(count: k * h, noBias: true, name: "x_v")
+  let normK = RMSNorm(epsilon: 1e-6, axis: [3], name: "x_norm_k")
+  let keys = Functional.cmul(left: normK(toKeys(xOut).reshaped([b, t, h, k])), right: rot)
+  let values = toValues(xOut).reshaped([b, t, h, k])
+  guard outputsTokens else {
+    return Model([x, rot, chunks[0], chunks[1]], [keys, values])
+  }
+  let toQueries = Dense(count: k * h, noBias: true, name: "x_q")
+  let normQ = RMSNorm(epsilon: 1e-6, axis: [3], name: "x_norm_q")
+  let queries = Functional.cmul(left: normQ(toQueries(xOut).reshaped([b, t, h, k])), right: rot)
+  let attention = MOSSImageAttention(
+    queries: queries, keys: keys, values: values, b: b, t: t, h: h, k: k,
+    usesFlashAttention: usesFlashAttention)
+  let unifyheads = Dense(count: k * h, noBias: true, name: "x_o")
+  var out = x + unifyheads(attention).to(.Float32) .* chunks[2]
+  let norm2 = RMSNorm(epsilon: 1e-6, axis: [2], name: "x_norm2")
+  let ffnIn = (norm2(out) .* chunks[4] + chunks[3]).to(T.dataType)
+  let ffnUp = Dense(count: intermediateSize, noBias: true, name: "ffn_up_proj")
+  let ffnGate = Dense(count: intermediateSize, noBias: true, name: "ffn_gate_proj")
+  let ffnDown = Dense(count: k * h, noBias: true, name: "ffn_down_proj")
+  out = out + ffnDown(MOSSImageSiTU(ffnUp(ffnIn), ffnGate(ffnIn))).to(.Float32) .* chunks[5]
+  return Model([x, rot] + chunks, [out, keys, values])
 }
 
 /// The main MOSS Image transformer. Inputs are the latent, the rotary embedding, the refined text
 /// from `MOSSImageFixed`, 6 shared modulation chunks, the head shift / scale, and one rotary
 /// embedding per skippable block. With `skipsLayers`, these rotary embeddings are 0-length ([0]),
 /// the skippable blocks run on 0-length tensors and leave every token unchanged.
+///
+/// When editing (`referenceLength` > 0), every block's reference keys and values from
+/// `MOSSImageFixed` come after the head shift / scale, before the skippable rotary embeddings.
 public func MOSSImage<T: TensorNumeric>(
   _ dataType: T.Type, batchSize: Int, tokenLength: Int, height: Int, width: Int, channels: Int,
-  layers: Int, skippableLayers: [Int], skipsLayers: Bool, usesFlashAttention: FlashAttentionLevel
+  layers: Int, skippableLayers: [Int], skipsLayers: Bool, usesFlashAttention: FlashAttentionLevel,
+  referenceLength: Int = 0
 ) -> (ModelWeightMapper, Model) {
   precondition(height % 2 == 0 && width % 2 == 0)
   let x = Input()
@@ -240,6 +327,7 @@ public func MOSSImage<T: TensorNumeric>(
   let chunks = (0..<6).map { _ in Input() }
   let shift = Input()
   let scale = Input()
+  let referenceKeysValues = (0..<(referenceLength > 0 ? layers * 2 : 0)).map { _ in Input() }
   let skippableRots = skippableLayers.map { _ in Input() }
   let h = height / 2
   let w = width / 2
@@ -257,8 +345,9 @@ public func MOSSImage<T: TensorNumeric>(
     let skippableIndex = skippableLayers.firstIndex(of: i)
     let (mapper, block) = MOSSImageBlock(
       T.self, prefix: "layers.\(i)", k: k, h: heads, b: batchSize, t: sequenceLength,
-      outputLength: i == layers - 1 ? h * w : sequenceLength, intermediateSize: 8_192,
-      usesFlashAttention: usesFlashAttention)
+      outputLength: i == layers - 1 ? h * w : sequenceLength, referenceLength: referenceLength,
+      intermediateSize: 8_192, usesFlashAttention: usesFlashAttention)
+    let references = referenceLength > 0 ? Array(referenceKeysValues[(i * 2)..<(i * 2 + 2)]) : []
     if let skippableIndex = skippableIndex {
       // Both branches build the same graph so the model builder keeps the weights when switching
       // between them. A skipped block runs on 0-length tensors, and its output is dropped as the
@@ -267,12 +356,12 @@ public func MOSSImage<T: TensorNumeric>(
         [
           out.reshaped(skipsLayers ? [0] : [batchSize, sequenceLength, channels]),
           skippableRots[skippableIndex],
-        ] + chunks)
+        ] + chunks + references)
       out = Functional.concat(
         axis: 1, blockOut.reshaped(skipsLayers ? [0] : [batchSize, sequenceLength, channels]),
         out.reshaped(skipsLayers ? [batchSize, sequenceLength, channels] : [0]))
     } else {
-      out = block([out, rot] + chunks)
+      out = block([out, rot] + chunks + references)
     }
     mappers.append(mapper)
   }
@@ -297,7 +386,8 @@ public func MOSSImage<T: TensorNumeric>(
   }
   return (
     mapper,
-    Model([x, rot, contextIn] + chunks + [shift, scale] + skippableRots, [out])
+    Model(
+      [x, rot, contextIn] + chunks + [shift, scale] + referenceKeysValues + skippableRots, [out])
   )
 }
 
@@ -306,13 +396,20 @@ public func MOSSImage<T: TensorNumeric>(
 /// of the longest prompt. Outputs are the refined context in FP32, then the 6 shared modulation
 /// chunks and the head shift / scale, each is [timesteps, 1, channels] in FP32 with 1 already added
 /// to the scales.
+///
+/// When editing, the reference latents (one per size in `referenceSizes`) and their rotary
+/// embedding follow, the last timestep is 0, and every block's reference keys and values follow the
+/// head shift / scale in the outputs.
 public func MOSSImageFixed<T: TensorNumeric>(
   _ dataType: T.Type, batchSize: Int, tokenLengths: [Int], timesteps: Int, channels: Int,
-  usesFlashAttention: FlashAttentionLevel
+  usesFlashAttention: FlashAttentionLevel, referenceSizes: [(height: Int, width: Int)] = [],
+  layers: Int = 42
 ) -> (ModelWeightMapper, Model) {
   let contextIn = Input()
   let rot = Input()
   let t = Input()
+  let references = referenceSizes.map { _ in Input() }
+  let referenceRot = Input()
   let contextEmbedder = Dense(count: channels, name: "context_embedder")
   var context = contextEmbedder(contextIn).to(.Float32)
   var mappers = [ModelWeightMapper]()
@@ -336,6 +433,42 @@ public func MOSSImageFixed<T: TensorNumeric>(
   let scale = Dense(count: channels, name: "ada_ln_0")
   chunks.append(shift(tIn).to(.Float32))
   chunks.append(1 + scale(tIn).to(.Float32))
+  // When editing, the reference tokens run through every block once at timestep 0 (the last row of
+  // the modulation), their keys and values are what the image and text tokens attend to.
+  var referenceKeysValues = [Model.IO]()
+  if !referenceSizes.isEmpty {
+    let xEmbedder = Dense(count: channels, name: "x_embedder")
+    let embedded = zip(references, referenceSizes).map { reference, size in
+      xEmbedder(
+        reference.reshaped([batchSize, size.height / 2, 2, size.width / 2, 2, 32]).permuted(
+          0, 1, 3, 5, 2, 4
+        ).contiguous().reshaped(
+          [batchSize, (size.height / 2) * (size.width / 2), 32 * 2 * 2], format: .NHWC)
+      ).to(.Float32)
+    }
+    var out = embedded.count > 1 ? Concat(axis: 1)(embedded) : embedded[0]
+    let referenceLength = referenceSizes.reduce(0) { $0 + ($1.height / 2) * ($1.width / 2) }
+    let referenceChunks = chunks[0..<6].map {
+      $0.reshaped(
+        [1, 1, channels], offset: [timesteps - 1, 0, 0], strides: [channels, channels, 1]
+      ).contiguous()
+    }
+    for i in 0..<layers {
+      let outputsTokens = i < layers - 1
+      let block = MOSSImageReferenceBlock(
+        T.self, k: 128, h: channels / 128, b: batchSize, t: referenceLength,
+        outputsTokens: outputsTokens, intermediateSize: 8_192,
+        usesFlashAttention: usesFlashAttention)
+      if outputsTokens {
+        let blockOut = block([out, referenceRot] + referenceChunks)
+        out = blockOut[0]
+        referenceKeysValues.append(contentsOf: [blockOut[1], blockOut[2]])
+      } else {
+        let blockOut = block(out, referenceRot, referenceChunks[0], referenceChunks[1])
+        referenceKeysValues.append(contentsOf: [blockOut[0], blockOut[1]])
+      }
+    }
+  }
   let mapper: ModelWeightMapper = { format in
     var mapping = ModelWeightMapping()
     for mapper in mappers {
@@ -354,7 +487,12 @@ public func MOSSImageFixed<T: TensorNumeric>(
     mapping["video_head_modulation.bias"] = [shift.bias.name, scale.bias.name]
     return mapping
   }
-  return (mapper, Model([contextIn, rot, t], [context] + chunks))
+  return (
+    mapper,
+    Model(
+      [contextIn, rot, t] + references + (referenceSizes.isEmpty ? [] : [referenceRot]),
+      [context] + chunks + referenceKeysValues)
+  )
 }
 
 private func LoRAMOSSImageTextBlock<T: TensorNumeric>(
@@ -441,7 +579,7 @@ private func LoRAMOSSImageTextBlock<T: TensorNumeric>(
 
 private func LoRAMOSSImageBlock<T: TensorNumeric>(
   _ dataType: T.Type, prefix: String, k: Int, h: Int, b: Int, t: Int, outputLength: Int,
-  intermediateSize: Int, usesFlashAttention: FlashAttentionLevel, layerIndex: Int,
+  referenceLength tr: Int, intermediateSize: Int, usesFlashAttention: FlashAttentionLevel, layerIndex: Int,
   configuration: LoRANetworkConfiguration
 ) -> (ModelWeightMapper, Model) {
   let x = Input()
@@ -463,8 +601,17 @@ private func LoRAMOSSImageBlock<T: TensorNumeric>(
   let values = toValues(xOut).reshaped([b, t, h, k])
   queries = Functional.cmul(left: queries, right: rot)
   keys = Functional.cmul(left: keys, right: rot)
+  // When editing, image and text tokens attend to the reference tokens as well, whose keys (with
+  // their rotary embedding) and values come from `MOSSImageFixed`.
+  let referenceKeys = Input()
+  let referenceValues = Input()
+  var allValues = values
+  if tr > 0 {
+    keys = Functional.concat(axis: 1, keys, referenceKeys)
+    allValues = Functional.concat(axis: 1, values, referenceValues)
+  }
   var out = MOSSImageAttention(
-    queries: queries, keys: keys, values: values, b: b, t: t, h: h, k: k,
+    queries: queries, keys: keys, values: allValues, b: b, t: t, tk: t + tr, h: h, k: k,
     usesFlashAttention: usesFlashAttention)
   var xIn: Model.IO = x
   if outputLength < t {
@@ -506,13 +653,69 @@ private func LoRAMOSSImageBlock<T: TensorNumeric>(
     mapping["\(prefix).proj.ffn_down.weight"] = [ffnDown.weight.name]
     return mapping
   }
-  return (mapper, Model([x, rot] + chunks, [out]))
+  return (
+    mapper,
+    Model([x, rot] + chunks + (tr > 0 ? [referenceKeys, referenceValues] : []), [out])
+  )
+}
+
+/// A block of the reference tokens (editing) alone, with the same weights as `LoRAMOSSImageBlock`:
+/// they attend only to each other, at timestep 0. Outputs the tokens for the next block (unless
+/// `outputsTokens` is false, for the last one), then the keys (with the rotary embedding) and values
+/// the image and text tokens attend to.
+private func LoRAMOSSImageReferenceBlock<T: TensorNumeric>(
+  _ dataType: T.Type, k: Int, h: Int, b: Int, t: Int, outputsTokens: Bool, intermediateSize: Int,
+  usesFlashAttention: FlashAttentionLevel, layerIndex: Int,
+  configuration: LoRANetworkConfiguration
+) -> Model {
+  let x = Input()
+  let rot = Input()
+  let chunks = (0..<6).map { _ in Input() }
+  let norm1 = RMSNorm(epsilon: 1e-6, axis: [2], name: "x_norm1")
+  let xOut = (norm1(x) .* chunks[1] + chunks[0]).to(T.dataType)
+  let toKeys = LoRADense(
+    count: k * h, configuration: configuration, noBias: true, index: layerIndex,
+    name: "x_k")
+  let toValues = LoRADense(
+    count: k * h, configuration: configuration, noBias: true, index: layerIndex,
+    name: "x_v")
+  let normK = RMSNorm(epsilon: 1e-6, axis: [3], name: "x_norm_k")
+  let keys = Functional.cmul(left: normK(toKeys(xOut).reshaped([b, t, h, k])), right: rot)
+  let values = toValues(xOut).reshaped([b, t, h, k])
+  guard outputsTokens else {
+    return Model([x, rot, chunks[0], chunks[1]], [keys, values])
+  }
+  let toQueries = LoRADense(
+    count: k * h, configuration: configuration, noBias: true, index: layerIndex,
+    name: "x_q")
+  let normQ = RMSNorm(epsilon: 1e-6, axis: [3], name: "x_norm_q")
+  let queries = Functional.cmul(left: normQ(toQueries(xOut).reshaped([b, t, h, k])), right: rot)
+  let attention = MOSSImageAttention(
+    queries: queries, keys: keys, values: values, b: b, t: t, h: h, k: k,
+    usesFlashAttention: usesFlashAttention)
+  let unifyheads = LoRADense(
+    count: k * h, configuration: configuration, noBias: true, index: layerIndex,
+    name: "x_o")
+  var out = x + unifyheads(attention).to(.Float32) .* chunks[2]
+  let norm2 = RMSNorm(epsilon: 1e-6, axis: [2], name: "x_norm2")
+  let ffnIn = (norm2(out) .* chunks[4] + chunks[3]).to(T.dataType)
+  let ffnUp = LoRADense(
+    count: intermediateSize, configuration: configuration, noBias: true, index: layerIndex,
+    name: "ffn_up_proj")
+  let ffnGate = LoRADense(
+    count: intermediateSize, configuration: configuration, noBias: true, index: layerIndex,
+    name: "ffn_gate_proj")
+  let ffnDown = LoRADense(
+    count: k * h, configuration: configuration, noBias: true, index: layerIndex,
+    name: "ffn_down_proj")
+  out = out + ffnDown(MOSSImageSiTU(ffnUp(ffnIn), ffnGate(ffnIn))).to(.Float32) .* chunks[5]
+  return Model([x, rot] + chunks, [out, keys, values])
 }
 
 public func LoRAMOSSImage<T: TensorNumeric>(
   _ dataType: T.Type, batchSize: Int, tokenLength: Int, height: Int, width: Int, channels: Int,
   layers: Int, skippableLayers: [Int], skipsLayers: Bool, usesFlashAttention: FlashAttentionLevel,
-  LoRAConfiguration: LoRANetworkConfiguration
+  LoRAConfiguration: LoRANetworkConfiguration, referenceLength: Int = 0
 ) -> (ModelWeightMapper, Model) {
   precondition(height % 2 == 0 && width % 2 == 0)
   let x = Input()
@@ -521,6 +724,7 @@ public func LoRAMOSSImage<T: TensorNumeric>(
   let chunks = (0..<6).map { _ in Input() }
   let shift = Input()
   let scale = Input()
+  let referenceKeysValues = (0..<(referenceLength > 0 ? layers * 2 : 0)).map { _ in Input() }
   let skippableRots = skippableLayers.map { _ in Input() }
   let h = height / 2
   let w = width / 2
@@ -539,8 +743,10 @@ public func LoRAMOSSImage<T: TensorNumeric>(
     let skippableIndex = skippableLayers.firstIndex(of: i)
     let (mapper, block) = LoRAMOSSImageBlock(
       T.self, prefix: "layers.\(i)", k: k, h: heads, b: batchSize, t: sequenceLength,
-      outputLength: i == layers - 1 ? h * w : sequenceLength, intermediateSize: 8_192,
-      usesFlashAttention: usesFlashAttention, layerIndex: i, configuration: LoRAConfiguration)
+      outputLength: i == layers - 1 ? h * w : sequenceLength, referenceLength: referenceLength,
+      intermediateSize: 8_192, usesFlashAttention: usesFlashAttention, layerIndex: i,
+      configuration: LoRAConfiguration)
+    let references = referenceLength > 0 ? Array(referenceKeysValues[(i * 2)..<(i * 2 + 2)]) : []
     if let skippableIndex = skippableIndex {
       // Both branches build the same graph so the model builder keeps the weights when switching
       // between them. A skipped block runs on 0-length tensors, and its output is dropped as the
@@ -549,12 +755,12 @@ public func LoRAMOSSImage<T: TensorNumeric>(
         [
           out.reshaped(skipsLayers ? [0] : [batchSize, sequenceLength, channels]),
           skippableRots[skippableIndex],
-        ] + chunks)
+        ] + chunks + references)
       out = Functional.concat(
         axis: 1, blockOut.reshaped(skipsLayers ? [0] : [batchSize, sequenceLength, channels]),
         out.reshaped(skipsLayers ? [batchSize, sequenceLength, channels] : [0]))
     } else {
-      out = block([out, rot] + chunks)
+      out = block([out, rot] + chunks + references)
     }
     mappers.append(mapper)
   }
@@ -582,17 +788,21 @@ public func LoRAMOSSImage<T: TensorNumeric>(
   return (
     mapper,
     Model(
-      [x, rot, contextIn] + chunks + [shift, scale] + skippableRots, [out], trainable: false)
+      [x, rot, contextIn] + chunks + [shift, scale] + referenceKeysValues + skippableRots, [out],
+      trainable: false)
   )
 }
 
 public func LoRAMOSSImageFixed<T: TensorNumeric>(
   _ dataType: T.Type, batchSize: Int, tokenLengths: [Int], timesteps: Int, channels: Int,
-  usesFlashAttention: FlashAttentionLevel, LoRAConfiguration: LoRANetworkConfiguration
+  usesFlashAttention: FlashAttentionLevel, LoRAConfiguration: LoRANetworkConfiguration,
+  referenceSizes: [(height: Int, width: Int)] = [], layers: Int = 42
 ) -> (ModelWeightMapper, Model) {
   let contextIn = Input()
   let rot = Input()
   let t = Input()
+  let references = referenceSizes.map { _ in Input() }
+  let referenceRot = Input()
   let contextEmbedder = LoRADense(
     count: channels, configuration: LoRAConfiguration, index: 0, name: "context_embedder")
   var context = contextEmbedder(contextIn).to(.Float32)
@@ -625,6 +835,44 @@ public func LoRAMOSSImageFixed<T: TensorNumeric>(
     count: channels, configuration: LoRAConfiguration, index: 0, name: "ada_ln_0")
   chunks.append(shift(tIn).to(.Float32))
   chunks.append(1 + scale(tIn).to(.Float32))
+  // When editing, the reference tokens run through every block once at timestep 0 (the last row of
+  // the modulation), their keys and values are what the image and text tokens attend to.
+  var referenceKeysValues = [Model.IO]()
+  if !referenceSizes.isEmpty {
+    let xEmbedder = LoRADense(
+      count: channels, configuration: LoRAConfiguration, index: 0, name: "x_embedder")
+    let embedded = zip(references, referenceSizes).map { reference, size in
+      xEmbedder(
+        reference.reshaped([batchSize, size.height / 2, 2, size.width / 2, 2, 32]).permuted(
+          0, 1, 3, 5, 2, 4
+        ).contiguous().reshaped(
+          [batchSize, (size.height / 2) * (size.width / 2), 32 * 2 * 2], format: .NHWC)
+      ).to(.Float32)
+    }
+    var out = embedded.count > 1 ? Concat(axis: 1)(embedded) : embedded[0]
+    let referenceLength = referenceSizes.reduce(0) { $0 + ($1.height / 2) * ($1.width / 2) }
+    let referenceChunks = chunks[0..<6].map {
+      $0.reshaped(
+        [1, 1, channels], offset: [timesteps - 1, 0, 0], strides: [channels, channels, 1]
+      ).contiguous()
+    }
+    for i in 0..<layers {
+      let outputsTokens = i < layers - 1
+      let block = LoRAMOSSImageReferenceBlock(
+        T.self, k: 128, h: channels / 128, b: batchSize, t: referenceLength,
+        outputsTokens: outputsTokens, intermediateSize: 8_192,
+        usesFlashAttention: usesFlashAttention, layerIndex: i,
+        configuration: LoRAConfiguration)
+      if outputsTokens {
+        let blockOut = block([out, referenceRot] + referenceChunks)
+        out = blockOut[0]
+        referenceKeysValues.append(contentsOf: [blockOut[1], blockOut[2]])
+      } else {
+        let blockOut = block(out, referenceRot, referenceChunks[0], referenceChunks[1])
+        referenceKeysValues.append(contentsOf: [blockOut[0], blockOut[1]])
+      }
+    }
+  }
   let mapper: ModelWeightMapper = { format in
     var mapping = ModelWeightMapping()
     for mapper in mappers {
@@ -643,5 +891,10 @@ public func LoRAMOSSImageFixed<T: TensorNumeric>(
     mapping["video_head_modulation.bias"] = [shift.bias.name, scale.bias.name]
     return mapping
   }
-  return (mapper, Model([contextIn, rot, t], [context] + chunks, trainable: false))
+  return (
+    mapper,
+    Model(
+      [contextIn, rot, t] + references + (referenceSizes.isEmpty ? [] : [referenceRot]),
+      [context] + chunks + referenceKeysValues, trainable: false)
+  )
 }

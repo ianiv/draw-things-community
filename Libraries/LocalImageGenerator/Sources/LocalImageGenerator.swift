@@ -3616,7 +3616,7 @@ extension LocalImageGenerator {
         .ssd1b, .svdI2v, .wurstchenStageB, .wurstchenStageC, .hunyuanVideo, .wan21_1_3b, .wan21_14b,
         .hiDreamI1, .hiDreamO1, .wan22_5b, .zImage, .ernieImage, .cosmos2_5_2b,
         .cosmos2_5_2_9b, .seedvr2_3b,
-        .seedvr2_7b, .ideogram4, .krea2, .minimaxH3, .mossImage:
+        .seedvr2_7b, .ideogram4, .krea2, .minimaxH3:
         return (nil, [])
       case .longcatVideoAvatar1_5:
         // ai2v: the reference image becomes the clean first latent frame substituted during
@@ -3656,10 +3656,11 @@ extension LocalImageGenerator {
             moments[0..<1, 0..<moments.shape[1], 0..<moments.shape[2], 0..<64].copied())
         }
         return (nil, encoded)
-      case .flux1, .qwenImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2:
+      case .flux1, .qwenImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
+        // MOSS Image edit LoRAs take references in the FLUX.2 latent space too.
         let inputChannels =
           (version == .flux2 || version == .flux2_9b || version == .flux2_4b
-            || version == .flux3_5b || version == .fibo2) ? 32 : 16
+            || version == .flux3_5b || version == .fibo2 || version == .mossImage) ? 32 : 16
         var referenceEncoded = [DynamicGraph.Tensor<FloatType>]()
         if let image = image {
           let encoded = firstStage.encode(image, encoder: nil, cancellation: { _ in }).0

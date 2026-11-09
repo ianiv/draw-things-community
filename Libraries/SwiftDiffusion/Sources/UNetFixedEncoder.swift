@@ -2963,13 +2963,37 @@ extension UNetFixedEncoder {
           from: MOSSImageRotaryPositionEmbedding(
             height: 0, width: 0, tokenLengths: [tokenLengths.max() ?? tokenLengthCond])
         ).toGPU(0))
-      var timeEmbeds = graph.variable(.GPU(0), .WC(timesteps.count, 256), of: FloatType.self)
-      for (i, timestep) in timesteps.enumerated() {
+      // When editing, the last row is timestep 0, which modulates the reference tokens.
+      let modulationTimesteps = referenceImages.isEmpty ? timesteps : timesteps + [0]
+      var timeEmbeds = graph.variable(
+        .GPU(0), .WC(modulationTimesteps.count, 256), of: FloatType.self)
+      for (i, timestep) in modulationTimesteps.enumerated() {
         timeEmbeds[i..<(i + 1), 0..<256] = graph.variable(
           Tensor<FloatType>(
             from: timeEmbedding(
               timestep: timestep, batchSize: 1, embeddingSize: 256, maxPeriod: 10_000)
           ).toGPU(0))
+      }
+      // The reference latents (one copy per batch) and their rotary embedding.
+      let referenceSizes = referenceImages.map { (height: $0.shape[1], width: $0.shape[2]) }
+      var referenceInputs = [DynamicGraph.AnyTensor]()
+      if !referenceImages.isEmpty {
+        referenceInputs = referenceImages.map { reference in
+          guard batchSize > 1 else { return reference }
+          let shape = reference.shape
+          var repeated = graph.variable(
+            .GPU(0), .NHWC(batchSize, shape[1], shape[2], shape[3]), of: FloatType.self)
+          for i in 0..<batchSize {
+            repeated[i..<(i + 1), 0..<shape[1], 0..<shape[2], 0..<shape[3]] = reference
+          }
+          return repeated
+        }
+        referenceInputs.append(
+          graph.variable(
+            Tensor<FloatType>(
+              from: MOSSImageReferenceRotaryPositionEmbedding(
+                sizes: referenceSizes.map { (height: $0.height / 2, width: $0.width / 2) })
+            ).toGPU(0)))
       }
       let unetFixed: Model
       let (rankOfLoRA, filesRequireMerge) = LoRALoader.rank(
@@ -2984,26 +3008,28 @@ extension UNetFixedEncoder {
         configuration.keys = LoRALoader.keys(graph, of: lora.map { $0.file }, modelFile: filePath)
         (_, unetFixed) = LoRAMOSSImageFixed(
           FloatType.self, batchSize: batchSize, tokenLengths: tokenLengths,
-          timesteps: timesteps.count, channels: 3_072,
+          timesteps: modulationTimesteps.count, channels: 3_072,
           usesFlashAttention: valueOr(usesFlashAttention, .scale1),
-          LoRAConfiguration: configuration)
+          LoRAConfiguration: configuration, referenceSizes: referenceSizes)
       } else {
         (_, unetFixed) = MOSSImageFixed(
           FloatType.self, batchSize: batchSize, tokenLengths: tokenLengths,
-          timesteps: timesteps.count, channels: 3_072,
-          usesFlashAttention: valueOr(usesFlashAttention, .scale1))
+          timesteps: modulationTimesteps.count, channels: 3_072,
+          usesFlashAttention: valueOr(usesFlashAttention, .scale1),
+          referenceSizes: referenceSizes)
       }
       unetFixed.maxConcurrency = .limit(4)
-      unetFixed.compile(inputs: context, textRotary, timeEmbeds)
-      let loadedFromWeightsCache = weightsCache.detach(
-        "\(filePath):[fixed]", to: unetFixed.parameters)
+      unetFixed.compile(inputs: [context, textRotary, timeEmbeds] + referenceInputs)
+      // The reference blocks have weights of their own (the transformer's).
+      let fixedCacheKey = "\(filePath):[fixed]" + (referenceImages.isEmpty ? "" : ":ref")
+      let loadedFromWeightsCache = weightsCache.detach(fixedCacheKey, to: unetFixed.parameters)
       graph.openStore(
         filePath, flags: .readOnly, externalStore: TensorData.externalStore(filePath: filePath)
       ) { store in
         if !lora.isEmpty {
           if shouldRunLoRASeparately {
             let mapping: [Int: Int] = [Int: Int](
-              uniqueKeysWithValues: (0..<2).map {
+              uniqueKeysWithValues: (0..<(referenceImages.isEmpty ? 2 : 42)).map {
                 return ($0, $0)
               })
             LoRALoader.openStore(graph, lora: lora) { loader in
@@ -3058,9 +3084,9 @@ extension UNetFixedEncoder {
           store.read("dit", model: unetFixed, codec: [.jit, .q6p, .q8p, .i8x, .ezm7, externalData])
         }
       }
-      let conditions = unetFixed(inputs: context, textRotary, timeEmbeds)
+      let conditions = unetFixed(inputs: context, [textRotary, timeEmbeds] + referenceInputs)
       if lora.isEmpty || (shouldRunLoRASeparately && filesRequireMerge.isEmpty) {
-        weightsCache.attach("\(filePath):[fixed]", from: unetFixed.parameters)
+        weightsCache.attach(fixedCacheKey, from: unetFixed.parameters)
       }
       // Unpack the refined text into one row per prompt, the same layout as the text encoding.
       let refined = DynamicGraph.Tensor<Float>(conditions[0])
@@ -3077,7 +3103,15 @@ extension UNetFixedEncoder {
         from: MOSSImageRotaryPositionEmbedding(
           height: startHeight / 2, width: startWidth / 2, tokenLengths: tokenLengths)
       ).toGPU(0)
-      return ([graph.variable(rotaryEmbedding), text] + conditions.dropFirst(), nil)
+      // The 6 block modulation chunks and the head shift / scale, without the timestep 0 row, then
+      // every block's reference keys and values when editing.
+      let modulations: [DynamicGraph.AnyTensor] = conditions[1..<9].map {
+        guard !referenceImages.isEmpty else { return $0 }
+        return DynamicGraph.Tensor<Float>($0)[0..<timesteps.count, 0..<1, 0..<3_072].copied()
+      }
+      return (
+        [graph.variable(rotaryEmbedding), text] + modulations + conditions[9...], nil
+      )
     case .fibo2:
       // Text bundles from Qwen3-VL, [1, T, 6 * 7680].
       let c0 = textEncoding[0]

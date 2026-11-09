@@ -406,14 +406,15 @@ public func UNetExtractConditions<FloatType: TensorNumeric & BinaryFloatingPoint
       }
       + conditions[(1 + fixedTimeConditionCount)..<conditions.count]
   case .mossImage:
-    // Rotary and text are followed by 6 shared modulation chunks and the head shift / scale.
+    // Rotary and text are followed by 6 shared modulation chunks and the head shift / scale. When
+    // editing, the reference keys and values after them don't change with the timestep.
     return conditions[0..<2]
-      + conditions[2..<conditions.count].map {
+      + conditions[2..<10].map {
         let shape = $0.shape
         return DynamicGraph.Tensor<Float>($0)[
           index..<(index + 1), 0..<shape[1], 0..<shape[2]
         ].copied()
-      }
+      } + conditions[10...]
   case .fibo2:
     // Only the noisy chunks and the final scale depend on the timestep.
     let count = conditions.count
@@ -1954,7 +1955,9 @@ extension UNetFromNNC {
       unet = ModelBuilderOrModel.modelBuilder(
         ModelBuilder { _, inputs in
           // The negative branch skips block 22 (upstream `uncond_skip_layers`) by passing 0-length
-          // rotary embeddings to it.
+          // rotary embeddings to it. When editing, every block's reference keys and values follow
+          // the head shift / scale.
+          let referenceLength = inputs.count > 12 ? inputs[11].shape[1] : 0
           if usesLoRA {
             return LoRAMOSSImage(
               FloatType.self, batchSize: inputs[0].shape[0], tokenLength: inputs[2].shape[1],
@@ -1962,7 +1965,7 @@ extension UNetFromNNC {
               skippableLayers: [22],
               skipsLayers: inputs[inputs.count - 1].shape[0] == 0,
               usesFlashAttention: valueOr(useFlashAttention, .scale1),
-              LoRAConfiguration: configuration
+              LoRAConfiguration: configuration, referenceLength: referenceLength
             ).1
           }
           return MOSSImage(
@@ -1970,7 +1973,8 @@ extension UNetFromNNC {
             height: tiledHeight, width: tiledWidth, channels: 3_072, layers: 42,
             skippableLayers: [22],
             skipsLayers: inputs[inputs.count - 1].shape[0] == 0,
-            usesFlashAttention: valueOr(useFlashAttention, .scale1)
+            usesFlashAttention: valueOr(useFlashAttention, .scale1),
+            referenceLength: referenceLength
           ).1
         })
     case .fibo2:
@@ -5094,7 +5098,9 @@ extension UNetFromNNC {
       let contextShape = context.shape
       let imageLength = (shape[1] / 2) * (shape[2] / 2)
       // Each prompt runs at its own length with its own row of the rotary embedding. The negative
-      // branch skips block 22 by giving it 0-length rotary embeddings.
+      // branch skips block 22 by giving it 0-length rotary embeddings, except when editing: the
+      // edit LoRAs were trained with plain CFG.
+      let skipsUncondLayers = referenceImageCount == 0
       func run(_ range: Range<Int>, index: Int, tokenLength: Int, skipsLayers: Bool)
         -> DynamicGraph.Tensor<FloatType>
       {
@@ -5125,10 +5131,12 @@ extension UNetFromNNC {
           return Functional.concat(axis: 0, etCond, etCond)
         }
         etUncond = run(
-          0..<(shape[0] / 2), index: 0, tokenLength: tokenLengthUncond, skipsLayers: true)
+          0..<(shape[0] / 2), index: 0, tokenLength: tokenLengthUncond,
+          skipsLayers: skipsUncondLayers)
       } else {
         etUncond = run(
-          0..<(shape[0] / 2), index: 0, tokenLength: tokenLengthUncond, skipsLayers: true)
+          0..<(shape[0] / 2), index: 0, tokenLength: tokenLengthUncond,
+          skipsLayers: skipsUncondLayers)
         etUncond.graph.joined()  // Wait for the result to be fully populated. Seems otherwise I can have Metal error for very large executions.
         guard !isCancelled.load(ordering: .acquiring) else {
           return Functional.concat(axis: 0, etUncond, etUncond)
