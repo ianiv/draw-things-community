@@ -1615,6 +1615,24 @@ extension FirstStage {
         encodingTileSize.depth = 5
         temporalTiledEncodingConfiguration = (overlap: 0, trailingFrameDrop: 3)
       }
+      if !isVideo {
+        // The encoder's first layers hold 3 x (height + 2) x (width + 2) x 128 values, which no
+        // longer fits the graph's 32-bit sizes above about 5.6 megapixels. Larger images (and
+        // larger tiles the user asked for) are encoded in 1,024-pixel tiles with a 64-pixel
+        // overlap, as the reference VAE tiles its encoder.
+        let fits = { (width: Int, height: Int) in width * height <= 128 * 128 }
+        if tiledEncoding {
+          if !fits(encodingTileSize.width, encodingTileSize.height) {
+            encodingTileSize.width = min(encodingTileSize.width, 64)
+            encodingTileSize.height = min(encodingTileSize.height, 64)
+          }
+        } else if !fits(startWidth, startHeight) {
+          tiledEncoding = true
+          encodingTileSize.width = min(startWidth, 64)
+          encodingTileSize.height = min(startHeight, 64)
+          encodingTileOverlap = 2
+        }
+      }
       let height = (tiledEncoding ? encodingTileSize.height : startHeight) * 16
       let width = (tiledEncoding ? encodingTileSize.width : startWidth) * 16
       encoder =
