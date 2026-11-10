@@ -41,6 +41,7 @@ public enum ModelVersion: String, Codable {
   case seedvr2_7b = "seedvr2_7b"
   case longcatVideoAvatar1_5 = "longcat_video_avatar_v1.5"
   case minimaxH3 = "minimax_h3"
+  case minimaxH3Image = "minimax_h3_image"
   case mossImage = "moss_image"
 }
 
@@ -388,6 +389,10 @@ public func isCfgEnabled(
     // Only Fibo 2.0 Edit Turbo (distilled, no classifier-free guidance) is wired.
     return false
   }
+  guard version != .minimaxH3Image else {
+    // MiniMax H3 Image is CFG-distilled: it runs one positive branch per step.
+    return false
+  }
   guard version != .longcatVideoAvatar1_5 else {
     // Only the distilled no-CFG path is wired; the triple-guidance base path is not implemented.
     return false
@@ -550,7 +555,7 @@ func isBatchEnabled(_ version: ModelVersion) -> Bool {
     .krea2:
     return true
   case .hunyuanVideo, .svdI2v, .wan21_14b, .wan21_1_3b, .wan22_5b, .ltx2, .ltx2_3, .seedvr2_3b,
-    .seedvr2_7b, .longcatVideoAvatar1_5, .minimaxH3, .fibo2:
+    .seedvr2_7b, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image, .fibo2:
     return false
   }
 }

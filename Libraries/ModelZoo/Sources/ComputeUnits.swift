@@ -99,7 +99,7 @@ public enum ComputeUnits {
       .cosmos2_5_2_9b,
       .hiDreamI1,
       .hiDreamO1,
-      .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
+      .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3Image:
       return (max(1, Int(configuration.batchSize)) * cfgChannels, 1)
     case .svdI2v:
       return (cfgChannels, max(1, Int(configuration.numFrames)))
@@ -220,7 +220,7 @@ public enum ComputeUnits {
       * referenceImageCount(context: context, hasImage: hasImage, shuffleCount: shuffleCount)
 
     switch context.modelVersion {
-    case .minimaxH3:
+    case .minimaxH3, .minimaxH3Image:
       let frames = numFrames == 1 ? 1 : (numFrames - 2) / 5 * 17 + 5
       let audioLength =
         2

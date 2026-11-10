@@ -177,7 +177,7 @@ extension LocalImageGenerator {
       .mossImage,
       .cosmos2_5_2b, .cosmos2_5_2_9b,
       .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5,
-      .minimaxH3:
+      .minimaxH3, .minimaxH3Image:
       samplingTimesteps = []
       samplingSigmas = []
     }
@@ -191,7 +191,13 @@ extension LocalImageGenerator {
     let deviceProperties = DeviceCapability.deviceProperties
     // HyperFlow H3 Flash is distilled for Euler steps on fixed 4, 6 and 8-step grids; any sampler
     // the user picks runs as that.
-    if version == .minimaxH3, MiniMaxH3Layout.load(filePath: filePath).isTwoTime {
+    let h3Layout =
+      version == .minimaxH3 || version == .minimaxH3Image
+      ? MiniMaxH3Layout.load(filePath: filePath) : .standard
+    // MiniMax H3 Image has one output head per interval of its own sigma grid, so it too runs
+    // Euler steps on that grid (unshifted) whatever sampler is picked.
+    let h3ImageGrids = version == .minimaxH3Image ? h3Layout.sigmaGrids : [:]
+    if (version == .minimaxH3 && h3Layout.isTwoTime) || !h3ImageGrids.isEmpty {
       return DDIMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.RFSigmaGridDiscretization>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -213,7 +219,9 @@ extension LocalImageGenerator {
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
         cfgZeroStar: cfgZeroStar, isBF16: isBF16,
         discretization: Denoiser.RFSigmaGridDiscretization(
-          parameterization, objective: objective, grids: MiniMaxH3Layout.hyperFlowSigmaGrids),
+          parameterization, objective: objective,
+          grids: h3ImageGrids.isEmpty ? MiniMaxH3Layout.hyperFlowSigmaGrids : h3ImageGrids,
+          shiftsGrid: h3ImageGrids.isEmpty),
         weightsCache: weightsCache)
     }
     guard version != .wurstchenStageC && version != .wurstchenStageB else {
@@ -1764,6 +1772,19 @@ extension LocalImageGenerator {
         result.8 = result.8 - 34
         return result
       }
+    case .minimaxH3Image:
+      // The image model labels its reference pictures without angle brackets (ComfyUI's
+      // MiniMaxH3ImageConditioning); the prompt still calls them <Picture N>.
+      let imagePrefix =
+        images > 0
+        ? (1...images).map { "Picture \($0): <|vision_start|><|image_pad|><|vision_end|>" }
+          .joined() : ""
+      return tokenize(
+        graph: graph, tokenizer: tokenizerQwen3MinimaxH3,
+        text: imagePrefix + (text.isEmpty ? " " : text),
+        negativeText: imagePrefix + (negativeText.isEmpty ? " " : negativeText),
+        paddingToken: nil, addSpecialTokens: false, conditionalLength: 5120, modifier: .qwen3,
+        potentials: potentials, startLength: 0, endLength: 0, maxLength: 0, paddingLength: 0)
     case .minimaxH3:
       let imagePrefix =
         (modifier == .fl2va || modifier == .ref2va) && images > 0
@@ -3473,7 +3494,7 @@ extension LocalImageGenerator {
       case .ltx2, .ltx2_3:
         fatalError()
       case .auraflow, .flux1, .kandinsky21, .pixart, .hunyuanVideo, .seedvr2_3b, .seedvr2_7b,
-        .ideogram4, .minimaxH3:
+        .ideogram4, .minimaxH3, .minimaxH3Image:
         break
       }
     }
@@ -3578,7 +3599,7 @@ extension LocalImageGenerator {
         fatalError()
       case .hunyuanVideo:
         fatalError()
-      case .minimaxH3:
+      case .minimaxH3, .minimaxH3Image:
         return (nil, [])
       }
     case .canny:
@@ -3590,7 +3611,7 @@ extension LocalImageGenerator {
         .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3,
         .seedvr2_3b,
         .seedvr2_7b,
-        .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
+        .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
         return (nil, [])
       case .flux1:
         guard
@@ -3618,6 +3639,30 @@ extension LocalImageGenerator {
         .cosmos2_5_2_9b, .seedvr2_3b,
         .seedvr2_7b, .ideogram4, .krea2, .minimaxH3:
         return (nil, [])
+      case .minimaxH3Image:
+        // Every picture (the canvas first, then the moodboard) is a reference latent. The VAE
+        // sees each with its short edge within 1,024 to 2,048 pixels (ComfyUI's
+        // MiniMaxH3ImageConditioning).
+        let images =
+          (image.map { [$0] } ?? [])
+          + shuffles.filter { $0.1 > 0 }.map { graph.variable($0.0.toGPU(0)) }
+        let encoded = images.map { source in
+          let shape = source.shape
+          var image = source[0..<1, 0..<shape[1], 0..<shape[2], 0..<3].copied()
+          let shortEdge = Double(min(shape[1], shape[2]))
+          let scale = min(max(shortEdge, 1_024), 2_048) / shortEdge
+          let height = max(32, Int((Double(shape[1]) * scale / 32).rounded()) * 32)
+          let width = max(32, Int((Double(shape[2]) * scale / 32).rounded()) * 32)
+          if height != shape[1] || width != shape[2] {
+            image = Upsample(
+              .bilinear, widthScale: Float(width) / Float(shape[2]),
+              heightScale: Float(height) / Float(shape[1]))(image)
+          }
+          let encoded = firstStage.encode(image, encoder: nil, cancellation: { _ in }).0
+          return firstStage.scale(
+            encoded[0..<1, 0..<encoded.shape[1], 0..<encoded.shape[2], 0..<24].copied())
+        }
+        return (nil, encoded)
       case .longcatVideoAvatar1_5:
         // ai2v: the reference image becomes the clean first latent frame substituted during
         // sampling. Encoded through the shared Wan 2.1 first stage.
@@ -3749,7 +3794,7 @@ extension LocalImageGenerator {
         .mossImage, .seedvr2_3b,
         .seedvr2_7b,
         .ideogram4, .krea2,
-        .minimaxH3:
+        .minimaxH3, .minimaxH3Image:
         return x
       case .ltx2, .ltx2_3, .longcatVideoAvatar1_5:
         guard let firstFrame = imageCond.1.first else { return x }
@@ -3771,7 +3816,7 @@ extension LocalImageGenerator {
       .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b, .zImage, .ernieImage, .flux2,
       .flux2_9b, .flux2_4b,
       .flux3_5b, .fibo2, .mossImage,
-      .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3:
+      .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3, .minimaxH3Image:
       return false
     case .svdI2v:
       return true
@@ -3789,7 +3834,8 @@ extension LocalImageGenerator {
       .ssd1b, .svdI2v, .wurstchenStageB, .wurstchenStageC, .hunyuanVideo, .flux1, .hiDreamI1,
       .hiDreamO1, .qwenImage, .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b,
       .zImage, .ernieImage, .flux2,
-      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
+      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2,
+      .minimaxH3Image:
       return (1, image, nil)
     case .ltx2, .ltx2_3, .minimaxH3:
       guard forSample else {
@@ -3895,7 +3941,7 @@ extension LocalImageGenerator {
       .svdI2v, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .zImage, .ernieImage, .flux2,
       .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
       .ideogram4, .krea2,
-      .minimaxH3:
+      .minimaxH3, .minimaxH3Image:
       return (batchSize, 0)
     }
   }
@@ -3978,7 +4024,7 @@ extension LocalImageGenerator {
       return result
     case .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
       fatalError()
-    case .ltx2, .ltx2_3, .minimaxH3:
+    case .ltx2, .ltx2_3, .minimaxH3, .minimaxH3Image:
       fatalError()
     }
   }
@@ -4347,6 +4393,17 @@ extension LocalImageGenerator {
       firstPassAudioHeight = 0
     } else {
       switch modelVersion {
+      case .minimaxH3Image:
+        firstPassChannels = 24
+        firstPassScaleFactor = 16
+        firstPassStartWidth =
+          (hiresFixEnabled ? Int(configuration.hiresFixStartWidth) : Int(configuration.startWidth))
+          * 4
+        firstPassStartHeight =
+          (hiresFixEnabled
+            ? Int(configuration.hiresFixStartHeight) : Int(configuration.startHeight))
+          * 4
+        firstPassAudioHeight = 0
       case .minimaxH3:
         firstPassChannels = 24
         firstPassScaleFactor = 16
@@ -4651,7 +4708,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .minimaxH3Image,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break
@@ -5214,7 +5271,7 @@ extension LocalImageGenerator {
         )
         let channels: Int
         switch modelVersion {
-        case .minimaxH3:
+        case .minimaxH3, .minimaxH3Image:
           channels = 24
         case .qwenImage2_1:
           channels = 64
@@ -5758,6 +5815,12 @@ extension LocalImageGenerator {
       audioHeight = 0
     } else {
       switch modelVersion {
+      case .minimaxH3Image:
+        channels = 24
+        startScaleFactor = 16
+        startWidth = image.shape[2] / 16 / imageScaleFactor
+        startHeight = image.shape[1] / 16 / imageScaleFactor
+        audioHeight = 0
       case .minimaxH3:
         channels = 24
         startScaleFactor = 16
@@ -6014,7 +6077,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .minimaxH3Image,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break
@@ -7163,6 +7226,12 @@ extension LocalImageGenerator {
       audioHeight = 0
     } else {
       switch modelVersion {
+      case .minimaxH3Image:
+        channels = 24
+        startScaleFactor = 16
+        startWidth = image.shape[2] / 16 / imageScaleFactor
+        startHeight = image.shape[1] / 16 / imageScaleFactor
+        audioHeight = 0
       case .minimaxH3:
         channels = 24
         startScaleFactor = 16
@@ -7496,7 +7565,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .minimaxH3Image,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break
@@ -8123,6 +8192,12 @@ extension LocalImageGenerator {
       audioHeight = 0
     } else {
       switch modelVersion {
+      case .minimaxH3Image:
+        channels = 24
+        startScaleFactor = 16
+        startWidth = image.shape[2] / 16 / imageScaleFactor
+        startHeight = image.shape[1] / 16 / imageScaleFactor
+        audioHeight = 0
       case .minimaxH3:
         channels = 24
         startScaleFactor = 16
@@ -8455,7 +8530,7 @@ extension LocalImageGenerator {
       case .auraflow, .flux1, .kandinsky21, .pixart, .sd3, .sd3Large, .sdxlBase, .sdxlRefiner,
         .ssd1b, .v1, .v2, .wurstchenStageB, .wurstchenStageC, .hiDreamI1, .hiDreamO1, .qwenImage,
         .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .zImage, .ernieImage, .flux2,
-        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
+        .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .minimaxH3Image,
         .mossImage,
         .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
         break

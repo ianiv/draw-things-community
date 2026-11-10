@@ -61,7 +61,7 @@ extension UNetFixedEncoder {
       .seedvr2_3b, .seedvr2_7b,
       .ideogram4,
       .krea2,
-      .longcatVideoAvatar1_5, .minimaxH3:
+      .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
       return true
     case .v1, .v2, .kandinsky21:
       return false
@@ -209,7 +209,7 @@ extension UNetFixedEncoder {
       .ltx2_3, .seedvr2_3b,
       .seedvr2_7b,
       .ideogram4,
-      .krea2, .longcatVideoAvatar1_5, .minimaxH3:
+      .krea2, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
       return []
     case .v1, .v2, .kandinsky21:
       fatalError()
@@ -257,7 +257,7 @@ extension UNetFixedEncoder {
       externalOnDemand
       ? .externalOnDemand : .externalData(deviceProperties.isFreadPreferred ? .fread : .mmap)
     switch version {
-    case .minimaxH3:
+    case .minimaxH3, .minimaxH3Image:
       let externalOnDemand =
         self.externalOnDemand
         || externalOnDemandPartially(
@@ -270,15 +270,20 @@ extension UNetFixedEncoder {
       let referenceImageCount = referenceImages.count
       let referenceAudioCount = referenceAudios.count
       let layout = MiniMaxH3Layout.load(filePath: filePath)
-      let videoLatentFrames = batchSize
-      let audioHeight = MiniMaxH3AudioHeight(
-        videoLatentFrames: videoLatentFrames, latentWidth: startWidth)
+      // MiniMax H3 Image is the same transformer without the audio stream, denoising one frame.
+      let hasAudio = layout.hasAudio
+      precondition(hasAudio == (version == .minimaxH3))
+      let videoLatentFrames = hasAudio ? batchSize : 1
+      let audioHeight =
+        hasAudio
+        ? MiniMaxH3AudioHeight(videoLatentFrames: videoLatentFrames, latentWidth: startWidth) : 0
       let frames =
         videoLatentFrames == 1 ? 1 : (videoLatentFrames - 2) / 5 * 17 + 5
       let audioRows =
-        2
-        * Int(
-          (Double(frames) / Double(MiniMaxH3Configuration.framesPerSecond) * 40).rounded())
+        hasAudio
+        ? 2
+          * Int(
+            (Double(frames) / Double(MiniMaxH3Configuration.framesPerSecond) * 40).rounded()) : 0
       let videoHeight = startHeight - audioHeight
       let textBatchSize = isCfgEnabled ? 2 : 1
       let textBatchOffset = isCfgEnabled ? 0 : textEncoding[0].shape[0] - 1
@@ -320,7 +325,9 @@ extension UNetFixedEncoder {
                 ? (index == 0 ? 0 : Float(frames - 1) * 5 / 3) : Float(index))
           )
         }
-        var mediaPosition = Float(contextLength + (modifier == .ref2va ? referenceImageCount : 0))
+        // Reference pictures take one position each ahead of the target (Ref2VA and H3 Image).
+        var mediaPosition = Float(
+          contextLength + (modifier == .ref2va || !hasAudio ? referenceImageCount : 0))
         let audioPositions = referenceAudios.map { audio in
           let position = mediaPosition
           mediaPosition += Float(audio.shape[1] / 2)
@@ -353,26 +360,48 @@ extension UNetFixedEncoder {
             0..<1, (referenceLength + audioRows)..<(referenceLength + audioRows + videoLength),
             0..<1, 0..<128]
       }
+      // Curve-form checkpoints take interpolated rows of their time-embedding curve instead of
+      // sinusoidal frequencies (ComfyUI's `adaln_t_table`).
+      var timeCurve: Tensor<Float>? = nil
+      if layout.usesTimeCurve {
+        graph.openStore(
+          filePath, flags: .readOnly, externalStore: TensorData.externalStore(filePath: filePath)
+        ) {
+          timeCurve = $0.read(MiniMaxH3Layout.timeCurveStoreKey).map { Tensor<Float>(from: $0) }
+        }
+        precondition(timeCurve != nil)
+      }
+      let frequencySize = timeCurve?.shape[1] ?? 256
       var frequencies = Tensor<Float>(
         .CPU,
         .HWC(
           timesteps.count,
-          2 + (referenceImageCount > 0 ? 1 : 0) + (referenceAudioCount > 0 ? 1 : 0), 256))
+          2 + (referenceImageCount > 0 ? 1 : 0) + (referenceAudioCount > 0 ? 1 : 0),
+          frequencySize))
       for index in timesteps.indices {
         let videoSigma = timesteps[index] / 1_000
-        let audioSigma = MiniMaxH3AudioSigma(
-          forVideoSigma: videoSigma, audioShiftRatio: audioShiftRatio)
+        let audioSigma =
+          hasAudio
+          ? MiniMaxH3AudioSigma(forVideoSigma: videoSigma, audioShiftRatio: audioShiftRatio)
+          : videoSigma
         let values =
           [1 - videoSigma, 1 - audioSigma]
           + (referenceImageCount > 0 ? [max(1 - videoSigma, 0.999)] : [])
           + (referenceAudioCount > 0 ? [Float(1)] : [])
         for (modality, timestep) in values.enumerated() {
-          frequencies[
-            index..<(index + 1), modality..<(modality + 1),
-            0..<256
-          ] = timeEmbedding(
-            timestep: timestep, batchSize: 1, embeddingSize: 256, maxPeriod: 10_000
-          ).reshaped(.HWC(1, 1, 256))
+          if let timeCurve {
+            let row = MiniMaxH3Layout.timeCurve(timeCurve, at: timestep)
+            for (i, value) in row.enumerated() {
+              frequencies[index, modality, i] = value
+            }
+          } else {
+            frequencies[
+              index..<(index + 1), modality..<(modality + 1),
+              0..<256
+            ] = timeEmbedding(
+              timestep: timestep, batchSize: 1, embeddingSize: 256, maxPeriod: 10_000
+            ).reshaped(.HWC(1, 1, 256))
+          }
         }
       }
       let timestepFrequencies = graph.variable(Tensor<FloatType>(from: frequencies).toGPU(0))
@@ -501,11 +530,36 @@ extension UNetFixedEncoder {
           }
         }
       }
-      let fixedConditions = unetFixed(
+      var fixedConditions = unetFixed(
         inputs: text, [timestepFrequencies] + endpointFrequencies + references + referenceAudios)
+      if !hasAudio {
+        // The transformer has no audio rows: drop the audio modulation of every chunk, and end
+        // with the per-step weights of its stacked output heads.
+        let prefixCount = 1 + referenceImageCount
+        let chunkSize = 3 + (referenceImageCount > 0 ? 1 : 0)
+        let modulationCount = layout.layers.count * 6 * chunkSize
+        precondition(fixedConditions.count == prefixCount + modulationCount + 2)
+        var kept = Array(fixedConditions[0..<prefixCount])
+        for index in 0..<modulationCount where index % chunkSize != 2 {
+          kept.append(fixedConditions[prefixCount + index])
+        }
+        kept += fixedConditions[(prefixCount + modulationCount)...]
+        let heads = layout.outputHeads
+        var selector = Tensor<FloatType>(.CPU, .HWC(timesteps.count, heads, 1))
+        for index in timesteps.indices {
+          let weights = layout.headSelector(
+            sigma: Double(timesteps[index] / 1_000),
+            nextSigma: index + 1 < timesteps.count ? Double(timesteps[index + 1] / 1_000) : 0)
+          for (head, weight) in weights.enumerated() {
+            selector[index, head, 0] = FloatType(weight)
+          }
+        }
+        kept.append(graph.variable(selector.toGPU(0)))
+        fixedConditions = kept
+      }
       let fixedConditionCount = MiniMaxH3FixedConditionCount(
         layers: layout.layers.count, referenceImageCount: referenceImageCount,
-        referenceAudioCount: referenceAudioCount)
+        referenceAudioCount: referenceAudioCount, hasAudio: hasAudio)
       precondition(
         fixedConditions.count == fixedConditionCount + 1 + referenceImageCount + referenceAudioCount
       )
@@ -1260,7 +1314,7 @@ extension UNetFixedEncoder {
         .ltx2_3, .seedvr2_3b,
         .seedvr2_7b,
         .ideogram4,
-        .krea2, .longcatVideoAvatar1_5, .minimaxH3:
+        .krea2, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
         fatalError()
       }
       var timeEmbeds = graph.variable(

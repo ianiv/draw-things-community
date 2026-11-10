@@ -552,7 +552,7 @@ extension ModelPreloader {
       .flux2_9b, .flux2_4b,
       .flux3_5b, .fibo2, .mossImage,
       .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5,
-      .minimaxH3:
+      .minimaxH3, .minimaxH3Image:
       fatalError()
     }
     let cfgChannels: Int
@@ -786,7 +786,7 @@ extension ModelPreloader {
           .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
           .ideogram4,
           .krea2,
-          .longcatVideoAvatar1_5, .minimaxH3:
+          .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
           fatalError()
         }
         let tokensTensor = graph.variable(.GPU(0), .C(2 * 77), of: Int32.self)
@@ -830,7 +830,7 @@ extension ModelPreloader {
                     .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
                     .ltx2, .ltx2_3,
                     .seedvr2_3b,
-                    .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
+                    .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
                     fatalError()
                   }
                   return loader.mergeLoRA(
@@ -878,7 +878,7 @@ extension ModelPreloader {
                   .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2,
                   .ltx2_3,
                   .seedvr2_3b,
-                  .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
+                  .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
                   fatalError()
                 }
                 return .continue(name)
@@ -1190,7 +1190,7 @@ extension ModelPreloader {
             .ideogram4,
             .krea2, .longcatVideoAvatar1_5:
             return DeviceCapability.isLowPerformance
-          case .minimaxH3:
+          case .minimaxH3, .minimaxH3Image:
             return true
           }
         case .unet:
@@ -1432,7 +1432,7 @@ extension ModelPreloader {
       .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b,
       .ideogram4,
       .krea2,
-      .longcatVideoAvatar1_5, .minimaxH3:
+      .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
       let unet: UNetWrapper<FloatType>? = {
         switch x {
         case .success(let x):

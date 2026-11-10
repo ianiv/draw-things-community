@@ -1009,7 +1009,7 @@ public enum ImageConverter {
           return []
         }
       case .hunyuanVideo, .kandinsky21, .wan22_5b, .seedvr2_3b, .seedvr2_7b, .ideogram4,
-        .wurstchenStageB, .wurstchenStageC:
+        .wurstchenStageB, .wurstchenStageC, .minimaxH3Image:
         return []
       }
       guard #available(iOS 16.0, *), let taesd = taesd else {
@@ -1630,7 +1630,7 @@ public enum ImageConverter {
             bytes[i * 4 + 2] = UInt8(min(max(Int(b.isFinite ? b : 0), 0), 255))
             bytes[i * 4 + 3] = 255
           }
-        case .hiDreamO1, .ltx2, .ltx2_3, .minimaxH3:
+        case .hiDreamO1, .ltx2, .ltx2_3, .minimaxH3, .minimaxH3Image:
           bytes.deallocate()
           continue
         case .hunyuanVideo:

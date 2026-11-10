@@ -256,14 +256,16 @@ public final class ModelImporter {
     var isMOSSImage = stateDict.keys.contains {
       $0.contains("layers.41.proj.ffn_up_gate.")
     }
-    var isMiniMaxH3 =
-      stateDict.keys.contains {
-        $0.contains("token_refiner.blocks.1.attn.qkv_proj.")
-          || $0.contains("token_refiner.refiner_blocks.1.attn.to_q.")
-      }
-      && stateDict.keys.contains {
-        $0.contains("audio_patch_proj.") || $0.contains("audio_proj_in.")
-      }
+    let hasMiniMaxH3Refiner = stateDict.keys.contains {
+      $0.contains("token_refiner.blocks.1.attn.qkv_proj.")
+        || $0.contains("token_refiner.refiner_blocks.1.attn.to_q.")
+    }
+    let hasMiniMaxH3Audio = stateDict.keys.contains {
+      $0.contains("audio_patch_proj.") || $0.contains("audio_proj_in.")
+    }
+    var isMiniMaxH3 = hasMiniMaxH3Refiner && hasMiniMaxH3Audio
+    // MiniMax H3 Image is the H3 transformer without the audio projections.
+    var isMiniMaxH3Image = hasMiniMaxH3Refiner && !hasMiniMaxH3Audio
     let modifier: SamplerModifier
     let modelVersion: ModelVersion
     let inputDim: Int
@@ -349,6 +351,7 @@ public final class ModelImporter {
       isQwenImage2_1 = false
       isMOSSImage = false
       isMiniMaxH3 = false
+      isMiniMaxH3Image = false
       isFibo2 = false
     } else if isWurstchenStageC {
       modelVersion = .wurstchenStageC
@@ -562,6 +565,17 @@ public final class ModelImporter {
       isDiffusersFormat = stateDict.keys.contains {
         $0.contains("token_refiner.refiner_blocks.")
       }
+    } else if isMiniMaxH3Image {
+      // Both the full checkpoint and ComfyUI's curve form (an `adaln_t_table` in place of the
+      // time embedder) import; text-to-image and editing share the weights.
+      modelVersion = .minimaxH3Image
+      modifier = .kontext
+      inputDim = 24
+      h3Layout = MiniMaxH3LayoutFromStateDict(stateDict)
+      expectedTotalAccess = stateDict.count
+      isDiffusersFormat = stateDict.keys.contains {
+        $0.contains("token_refiner.refiner_blocks.")
+      }
     } else {
       throw UnpickleError.tensorNotFound
     }
@@ -604,7 +618,8 @@ public final class ModelImporter {
     let distilledGuidanceLayers = inspectionResult.distilledGuidanceLayers
     // Compressed H3 checkpoints (HyperFlow H3 Flash) drop blocks and factor linears.
     let h3Layout =
-      modelVersion == .minimaxH3 ? MiniMaxH3LayoutFromStateDict(stateDict) : .standard
+      modelVersion == .minimaxH3 || modelVersion == .minimaxH3Image
+      ? MiniMaxH3LayoutFromStateDict(stateDict) : .standard
     expectedTotalAccess = inspectionResult.numberOfTensors
     versionCheck(modelVersion)
     progress?(0.05)
@@ -636,7 +651,7 @@ public final class ModelImporter {
         throw Error.noTextEncoder
       case .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage:
         throw Error.noTextEncoder
-      case .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3:
+      case .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3, .minimaxH3Image:
         throw Error.noTextEncoder
       case .kandinsky21:
         fatalError()
@@ -684,7 +699,7 @@ public final class ModelImporter {
             }
           }
           switch modelVersion {
-          case .longcatVideoAvatar1_5, .minimaxH3:
+          case .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
             fatalError()
           case .v1, .sdxlBase, .ssd1b:
             (textModel, textModelReader) = CLIPTextModel(
@@ -741,7 +756,7 @@ public final class ModelImporter {
           }
           try graph.openStore(filePath) {
             switch modelVersion {
-            case .longcatVideoAvatar1_5, .minimaxH3:
+            case .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
               fatalError()
             case .v1, .sdxlBase, .ssd1b:
               if $0.keys.count < 196 {
@@ -866,7 +881,7 @@ public final class ModelImporter {
     case .mossImage:
       conditionalLength = 4096
       batchSize = 1
-    case .minimaxH3:
+    case .minimaxH3, .minimaxH3Image:
       conditionalLength = 5120
       batchSize = 1
     case .longcatVideoAvatar1_5:
@@ -984,6 +999,16 @@ public final class ModelImporter {
           + (0..<(h3Layout.layers.count * 18 + 4)).map { _ in
             graph.variable(.CPU, .HWC(1, 1, 5_376), of: FloatType.self)
           }
+      case .minimaxH3Image:
+        // No audio rows or modulations; the last input selects among the stacked output heads.
+        cArr =
+          [
+            graph.variable(.CPU, .HWC(1, 2, 5_376), of: FloatType.self),
+            graph.variable(.CPU, .NHWC(1, 1_026, 1, 128), of: FloatType.self),
+          ]
+          + (0..<(h3Layout.layers.count * 12 + 2)).map { _ in
+            graph.variable(.CPU, .HWC(1, 1, 5_376), of: FloatType.self)
+          } + [graph.variable(.CPU, .WC(h3Layout.outputHeads, 1), of: FloatType.self)]
       case .longcatVideoAvatar1_5:
         let rot = Tensor<FloatType>(
           from: WanRotaryPositionEmbedding(
@@ -1021,7 +1046,7 @@ public final class ModelImporter {
         }
         let vectors: [DynamicGraph.Tensor<FloatType>]
         switch modelVersion {
-        case .longcatVideoAvatar1_5, .minimaxH3:
+        case .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
           fatalError()
         case .sdxlBase, .ssd1b:
           vectors = [graph.variable(.CPU, .WC(batchSize, 2816), of: FloatType.self)]
@@ -1298,9 +1323,10 @@ public final class ModelImporter {
         (unetFixedMapper, unetFixed) = MOSSImageFixed(
           FloatType.self, batchSize: 1, tokenLengths: [32], timesteps: 1, channels: 3_072,
           usesFlashAttention: .scale1)
-      case .minimaxH3:
+      case .minimaxH3, .minimaxH3Image:
         (unetMapper, unet) = MiniMaxH3(
-          hiddenSize: 5_376, layers: h3Layout.layers.count, textLength: 2, audioLength: 4,
+          hiddenSize: 5_376, layers: h3Layout.layers.count, textLength: 2,
+          audioLength: h3Layout.hasAudio ? 4 : 0,
           videoFrames: 1, videoHeight: 64, videoWidth: 64, usesFlashAttention: .scale1,
           layout: h3Layout)
         (unetFixedMapper, unetFixed) = MiniMaxH3Fixed(
@@ -1626,11 +1652,13 @@ public final class ModelImporter {
           graph.variable(.CPU, .WC(1, 256), of: FloatType.self),
         ]
         tEmb = nil
-      case .minimaxH3:
+      case .minimaxH3, .minimaxH3Image:
         crossattn =
           [
             graph.variable(.CPU, .HWC(1, 2, 5_120), of: FloatType.self),
-            graph.variable(.CPU, .HWC(1, 2, 256), of: FloatType.self),
+            graph.variable(
+              .CPU, .HWC(1, 2, h3Layout.usesTimeCurve ? h3Layout.timeEmbeddingSize : 256),
+              of: FloatType.self),
           ]
           + (h3Layout.isTwoTime ? [graph.variable(.CPU, .HWC(1, 2, 256), of: FloatType.self)] : [])
         tEmb = nil
@@ -1991,7 +2019,7 @@ public final class ModelImporter {
           }
         }
       } else if modelVersion == .qwenImage2_1 || modelVersion == .mossImage
-        || modelVersion == .minimaxH3
+        || modelVersion == .minimaxH3 || modelVersion == .minimaxH3Image
       {
         // Remove the model.diffusion_model / model prefix.
         for (key, value) in stateDict {
@@ -2151,7 +2179,7 @@ public final class ModelImporter {
             .cosmos2_5_2_9b, .auraflow, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b,
             .flux3_5b, .ltx2, .ltx2_3,
             .longcatVideoAvatar1_5,
-            .ideogram4, .krea2, .minimaxH3:
+            .ideogram4, .krea2, .minimaxH3, .minimaxH3Image:
             let inputs: [DynamicGraph.Tensor<FloatType>] =
               [xTensor] + (tEmb.map { [$0] } ?? []) + cArr
             unet.compile(inputs: inputs)
@@ -2201,7 +2229,17 @@ public final class ModelImporter {
                 store.write("cap_pad_token", tensor: tensor)
               }
             }
-            if modelVersion == .minimaxH3 && !h3Layout.isStandard {
+            if modelVersion == .minimaxH3Image, h3Layout.usesTimeCurve,
+              let tableDescriptor = stateDict["adaln_t_table"]
+            {
+              // The time-embedding curve is data the fixed encoder interpolates, not a weight.
+              try archive.with(tableDescriptor) { tensor in
+                store.write(MiniMaxH3Layout.timeCurveStoreKey, tensor: Tensor<Float>(from: tensor))
+              }
+            }
+            if (modelVersion == .minimaxH3 || modelVersion == .minimaxH3Image)
+              && !h3Layout.isStandard
+            {
               var layout = h3Layout
               // The gate is stored as a one-element tensor next to the endpoint embedder.
               if layout.isTwoTime, let gateDescriptor = stateDict["hyperflow_gate"] {
@@ -2447,6 +2485,12 @@ public final class ModelImporter {
           }
         case .minimaxH3:
           if h3Layout.isStandard && $0.keys.count != 2_392 {
+            throw Error.tensorWritesFailed
+          }
+        case .minimaxH3Image:
+          // 50 blocks of 30 tensors (18 modulation projections with biases), the refiner and
+          // the input / output layers; the count is checked on the first real import.
+          if $0.keys.count < 2_000 {
             throw Error.tensorWritesFailed
           }
         case .longcatVideoAvatar1_5:
@@ -2821,7 +2865,7 @@ extension ModelImporter {
       }
     case .hiDreamO1:
       textEncoder = nil
-    case .qwenImage2_1, .mossImage, .minimaxH3:
+    case .qwenImage2_1, .mossImage, .minimaxH3, .minimaxH3Image:
       textEncoder = nil
     case .wan22_5b:
       textEncoder = fileNames.first {
@@ -2923,6 +2967,18 @@ extension ModelImporter {
       specification.objective = .u(conditionScale: 1000)
       specification.noiseDiscretization = .rf(
         .init(sigmaMin: 0, sigmaMax: 1, conditionScale: 1_000))
+    case .minimaxH3Image:
+      if specification.textEncoder == nil {
+        specification.textEncoder = "qwen_3_vl_32b_50_i8x.ckpt"
+      }
+      if specification.autoencoder == nil {
+        specification.autoencoder = "minimax_h3_image_vae_f16.ckpt"
+      }
+      specification.objective = .u(conditionScale: 1000)
+      specification.noiseDiscretization = .rf(
+        .init(sigmaMin: 0, sigmaMax: 1, conditionScale: 1_000))
+      // CFG and step distilled: six steps on its own sigma grid, no guidance.
+      specification.isConsistencyModel = true
     case .longcatVideoAvatar1_5:
       if specification.textEncoder == nil {
         specification.textEncoder = "umt5_xxl_encoder_q8p.ckpt"
@@ -3325,7 +3381,24 @@ func MiniMaxH3LayoutFromStateDict(_ stateDict: [String: TensorDescriptor]) -> Mi
   let isTwoTime =
     shapes["endpoint_time_embedder.proj_in.weight"] != nil
     || shapes["endpoint_time_embedder.linear_1.weight"] != nil
+  let hasAudio =
+    shapes["audio_patch_proj.weight"] != nil || shapes["audio_proj_in.weight"] != nil
+  // Curve-form checkpoints (ComfyUI) store the time-embedding curve instead of a time embedder.
+  let timeCurve = shapes["adaln_t_table"]
+  // PDD checkpoints stack one output head per sampling step. The MiniMax-H3-Image release has
+  // six, distilled on the grid of its pdd_config.json.
+  let heads =
+    (shapes["final_layer.video_out.weight"]?[0] ?? shapes["proj_out.weight"]?[0] ?? 96) / 96
+  let sigmaGrid: [Double]
+  if heads == MiniMaxH3Layout.imageSigmaGrid.count - 1 {
+    sigmaGrid = MiniMaxH3Layout.imageSigmaGrid
+  } else {
+    precondition(heads == 1, "Unknown sigma grid for \(heads) output heads")
+    sigmaGrid = []
+  }
   return MiniMaxH3Layout(
-    layers: layers.sorted(), ranks: ranks, timeEmbeddingSize: timeEmbeddingSize,
-    endpointGate: isTwoTime ? 0.25 : nil)
+    layers: layers.sorted(), ranks: ranks,
+    timeEmbeddingSize: timeCurve?[1] ?? timeEmbeddingSize,
+    endpointGate: isTwoTime ? 0.25 : nil, hasAudio: hasAudio, sigmaGrid: sigmaGrid,
+    timeCurveGrid: timeCurve?[0] ?? 0)
 }

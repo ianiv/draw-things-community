@@ -259,7 +259,9 @@ extension TextEncoder {
     var imageStarts = [Int]()
     var imageGrids = [(t: Int, h: Int, w: Int)]()
     var imageFeatures = [DynamicGraph.Tensor<FloatType>]()
-    if (modifier == .fl2va || modifier == .ref2va) && !images.isEmpty {
+    // MiniMax H3 Image shows Qwen every reference picture, whatever the modifier.
+    let isImageModel = version == .minimaxH3Image
+    if (modifier == .fl2va || modifier == .ref2va || isImageModel) && !images.isEmpty {
       let tokenIDs = tokens[0].rawValue.toCPU()
       imageStarts = (0..<tokenLengthCond).filter {
         tokenIDs[originalTokenLength + $0] == 151_655
@@ -274,7 +276,13 @@ extension TextEncoder {
         let width = image.shape[2]
         var resizedHeight = max(32, Int((Double(height) / 32).rounded()) * 32)
         var resizedWidth = max(32, Int((Double(width) / 32).rounded()) * 32)
-        if resizedHeight * resizedWidth > 12_845_056 {
+        if isImageModel {
+          // H3 Image puts the short edge of every reference at 1,024 pixels for Qwen
+          // (ComfyUI's IMAGE_REF_SHORT_EDGE).
+          let scale = 1_024 / Double(min(height, width))
+          resizedHeight = max(32, Int((Double(height) * scale / 32).rounded()) * 32)
+          resizedWidth = max(32, Int((Double(width) * scale / 32).rounded()) * 32)
+        } else if resizedHeight * resizedWidth > 12_845_056 {
           let scale = sqrt(Double(height * width) / 12_845_056)
           resizedHeight = max(32, Int(floor(Double(height) / scale / 32)) * 32)
           resizedWidth = max(32, Int(floor(Double(width) / scale / 32)) * 32)
@@ -4581,7 +4589,7 @@ extension TextEncoder {
   {
     let conditionalLength: Int
     switch version {
-    case .minimaxH3:
+    case .minimaxH3, .minimaxH3Image:
       return encodeMiniMaxH3(
         images: images, tokens: tokens, tokenLengthUncond: &tokenLengthUncond,
         tokenLengthCond: &tokenLengthCond, modifier: modifier)
@@ -4792,7 +4800,7 @@ extension TextEncoder {
         .ideogram4, .krea2, .ltx2,
         .ltx2_3,
         .seedvr2_3b,
-        .seedvr2_7b, .longcatVideoAvatar1_5, .minimaxH3:
+        .seedvr2_7b, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
         fatalError()
       }
       if let maskGPU = maskGPU.first, let injectedEmbeddingsGPU = injectedEmbeddingsGPU.first {
@@ -4834,7 +4842,7 @@ extension TextEncoder {
                   .mossImage,
                   .cosmos2_5_2b, .cosmos2_5_2_9b,
                   .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2,
-                  .longcatVideoAvatar1_5, .minimaxH3:
+                  .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
                   fatalError()
                 }
                 return loader.mergeLoRA(
@@ -4878,7 +4886,7 @@ extension TextEncoder {
                 .mossImage,
                 .cosmos2_5_2b, .cosmos2_5_2_9b, .ltx2,
                 .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5,
-                .minimaxH3:
+                .minimaxH3, .minimaxH3Image:
                 fatalError()
               }
               return .continue(name)

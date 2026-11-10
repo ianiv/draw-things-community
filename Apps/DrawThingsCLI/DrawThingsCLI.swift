@@ -1115,6 +1115,14 @@ private enum RecommendedSettingsResolver {
       builder.sampler = .dDIMTrailing
       builder.numFrames = 93
       builder.shift = 7
+    } else if modelSpecification.version == .minimaxH3Image {
+      // Distilled to six steps on its own sigma grid, without guidance or a flow shift.
+      builder.steps = 6
+      builder.guidanceScale = 1
+      builder.sampler = .dDIMTrailing
+      builder.shift = 1
+      builder.startWidth = 32
+      builder.startHeight = 32
     } else if modelSpecification.version == .minimaxH3 {
       builder.steps = 50
       builder.guidanceScale = 1
@@ -1715,6 +1723,9 @@ private func defaultImportedModelDisplayName(for artifactURL: URL) -> String {
 
 private func defaultImportScale(for version: ModelVersion, artifactFileName: String) -> UInt16 {
   switch version {
+  case .minimaxH3Image:
+    // Tuned for about 2,048 x 2,048 pixels of area.
+    return 32
   case .hunyuanVideo, .wan21_14b, .wan22_5b, .longcatVideoAvatar1_5, .minimaxH3:
     return 12
   case .wan21_1_3b:
@@ -1748,7 +1759,7 @@ private func validateCustomTextEncoderSupport(
     .qwenImage2_1, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
     .cosmos2_5_2b, .cosmos2_5_2_9b,
     .ltx2, .ltx2_3,
-    .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
+    .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
     throw ValidationError(
       "Custom text encoder import is not supported for \(ModelZoo.humanReadableNameForVersion(version))."
     )
@@ -1778,7 +1789,7 @@ private func projectedImportedOutputFiles(
       .qwenImage2_1, .wan22_5b, .zImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage,
       .cosmos2_5_2b, .cosmos2_5_2_9b,
       .ltx2,
-      .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3:
+      .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5, .minimaxH3, .minimaxH3Image:
       break
     }
   }

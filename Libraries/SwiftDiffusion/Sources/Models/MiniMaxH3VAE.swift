@@ -152,7 +152,9 @@ func H3VideoDecoderAttention(sequenceLength: Int, hiddenSize: Int) -> Model {
   return Model([x, rot], [output(attended)])
 }
 
-func H3VideoDecoderBlock(sequenceLength: Int, hiddenSize: Int) -> Model {
+func H3VideoDecoderBlock(sequenceLength: Int, hiddenSize: Int, feedForwardSize: Int = 8_192)
+  -> Model
+{
   let x = Input()
   let rot = Input()
   let norm1 = RMSNorm(epsilon: 1e-5, axis: [2], name: "norm1")
@@ -163,8 +165,8 @@ func H3VideoDecoderBlock(sequenceLength: Int, hiddenSize: Int) -> Model {
     x + attention(norm1(x).to(.Float16), rot).to(of: x) .* scale1
   let residual = out
   let norm2 = RMSNorm(epsilon: 1e-5, axis: [2], name: "norm2")
-  let up = Dense(count: 8_192, name: "ff_up")
-  let gate = Dense(count: 8_192, name: "ff_gate")
+  let up = Dense(count: feedForwardSize, name: "ff_up")
+  let gate = Dense(count: feedForwardSize, name: "ff_gate")
   let down = Dense(count: hiddenSize, name: "ff_down")
   let normed = norm2(out).to(.Float16)
   let scale2 = Parameter<Float>(
@@ -216,4 +218,73 @@ public func MiniMaxH3VideoDecoder(
       strides: [latentHeight * 16 * latentWidth * 16 * 3, latentWidth * 16 * 3, 3, 1]
     ).contiguous()
   return Model([latentTokens, rot, zeroToken], includeHidden ? [out, hidden] : [out])
+}
+
+/// Rotary rows of the MiniMax H3 Image decoder: 2D (y, x) rotations over the first half of each
+/// 64-wide head (8 frequencies per axis), identity for the rest and for the suffix tokens.
+func MiniMaxH3ImageDecoderRotaryEmbedding(latentHeight: Int, latentWidth: Int) -> Tensor<Float> {
+  let patchCount = latentHeight * latentWidth
+  let suffixCount = 4 + 1
+  var rotary = Tensor<Float>(.CPU, .NHWC(1, patchCount + suffixCount, 1, 64))
+  let inverseFrequencies = (0..<8).map { index in
+    pow(100.0, -Double(index) / 8)
+  }
+  var row = 0
+  for yIndex in 0..<latentHeight {
+    let y = 2 * (Double(yIndex) + 0.5) / Double(latentHeight) - 1
+    for xIndex in 0..<latentWidth {
+      let x = 2 * (Double(xIndex) + 0.5) / Double(latentWidth) - 1
+      var angleIndex = 0
+      for coordinate in [y, x] {
+        for inverseFrequency in inverseFrequencies {
+          let angle = 2 * Double.pi * coordinate * inverseFrequency
+          rotary[0, row, 0, 2 * angleIndex] = Float(cos(angle))
+          rotary[0, row, 0, 2 * angleIndex + 1] = Float(sin(angle))
+          angleIndex += 1
+        }
+      }
+      for index in 32..<64 {
+        rotary[0, row, 0, index] = index % 2 == 0 ? 1 : 0
+      }
+      row += 1
+    }
+  }
+  for suffix in 0..<suffixCount {
+    for index in 0..<64 {
+      rotary[0, patchCount + suffix, 0, index] = index % 2 == 0 ? 1 : 0
+    }
+  }
+  return rotary
+}
+
+/// The MiniMax H3 Image decoder: the H3 video decoder's ViT stack as a 2D decoder of one frame
+/// (1,024 wide, 24 layers, 16x16 pixel patches), following `MiniMaxH3ImageVAE` in ComfyUI.
+public func MiniMaxH3ImageDecoder(latentHeight: Int, latentWidth: Int) -> Model {
+  let hiddenSize = 1_024
+  let numPatches = latentHeight * latentWidth
+  let latentTokens = Input()
+  let rot = Input()
+  let zeroToken = Input()
+  let postQuant = Dense(count: 24, name: "post_quant_conv")
+  let input = Dense(count: hiddenSize, name: "decoder_proj_in")
+  var out = input(postQuant(latentTokens.reshaped(.HWC(1, numPatches, 24)))).to(.Float32)
+  let registers = Parameter<Float>(.GPU(0), .HWC(1, 4, hiddenSize), name: "register_tokens")
+  out = Functional.concat(axis: 1, out, registers, zeroToken)
+  let sequenceLength = numPatches + 4 + 1
+  for _ in 0..<24 {
+    let block = H3VideoDecoderBlock(
+      sequenceLength: sequenceLength, hiddenSize: hiddenSize, feedForwardSize: 4 * hiddenSize)
+    out = block(out, rot)
+  }
+  let norm = LayerNorm(epsilon: 1e-5, axis: [2], name: "decoder_norm_out")
+  out = norm(out).to(of: latentTokens)
+  let output = Dense(count: 3 * 16 * 16, name: "decoder_proj_out")
+  out = output(out).reshaped(
+    [1, numPatches, 3 * 16 * 16], offset: [0, 0, 0],
+    strides: [sequenceLength * 3 * 16 * 16, 3 * 16 * 16, 1]
+  ).contiguous()
+  out = out.reshaped([1, latentHeight, latentWidth, 3, 16, 16])
+    .permuted(0, 1, 4, 2, 5, 3).contiguous().reshaped(
+      .NHWC(1, latentHeight * 16, latentWidth * 16, 3))
+  return Model([latentTokens, rot, zeroToken], [out])
 }

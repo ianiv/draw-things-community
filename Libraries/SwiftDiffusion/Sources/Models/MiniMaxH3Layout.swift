@@ -41,12 +41,28 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   public var timeEmbeddingSize: Int
   /// Interpolation gate of the endpoint embedder. Nil for single-time checkpoints.
   public var endpointGate: Float?
+  /// False for MiniMax H3 Image, which has no audio stream (no audio projections in or out).
+  public var hasAudio: Bool
+  /// Sigma grid (descending, 1 to 0) a PDD checkpoint was distilled on. It has one stacked output
+  /// head per interval: the first is a full head, the others are offsets from it. Empty when the
+  /// checkpoint has a single output head.
+  public var sigmaGrid: [Double]
+  /// Rows of the `adaln_t_table` of curve-form checkpoints, which replace the time embedder with a
+  /// table of the time-embedding curve in a small shared basis (`timeEmbeddingSize` wide), sampled
+  /// uniformly over t in [0, 1]. Zero when the checkpoint has a time embedder.
+  public var timeCurveGrid: Int
 
-  public init(layers: [Int], ranks: [Int: Ranks], timeEmbeddingSize: Int, endpointGate: Float?) {
+  public init(
+    layers: [Int], ranks: [Int: Ranks], timeEmbeddingSize: Int, endpointGate: Float?,
+    hasAudio: Bool = true, sigmaGrid: [Double] = [], timeCurveGrid: Int = 0
+  ) {
     self.layers = layers
     self.ranks = ranks.filter { !$0.value.isDense }
     self.timeEmbeddingSize = timeEmbeddingSize
     self.endpointGate = endpointGate
+    self.hasAudio = hasAudio
+    self.sigmaGrid = sigmaGrid
+    self.timeCurveGrid = timeCurveGrid
   }
 
   public static let standard = MiniMaxH3Layout(
@@ -54,6 +70,15 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
 
   public var isStandard: Bool { self == .standard }
   public var isTwoTime: Bool { endpointGate != nil }
+  /// Stacked output heads (one per sigma-grid interval), 1 for ordinary checkpoints.
+  public var outputHeads: Int { max(1, sigmaGrid.count - 1) }
+  public var usesTimeCurve: Bool { timeCurveGrid > 0 }
+
+  /// The sigma grid of the MiniMax-H3-Image release (`pdd_config.json`).
+  public static let imageSigmaGrid: [Double] = [
+    1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132,
+    0.0,
+  ]
 
   public func ranks(ofLayer layer: Int) -> Ranks {
     ranks[layer] ?? .dense
@@ -86,11 +111,18 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   /// The checkpoint key holding a serialized non-standard layout.
   public static let storeKey = "minimax_h3_layout"
 
-  /// `[version, gate (or -1), timeEmbeddingSize, layerCount, (layer, q, k, v, o, fc1, fc2)...]`.
+  /// Version 1: `[1, gate (or -1), timeEmbeddingSize, layerCount, (layer, q, k, v, o, fc1, fc2)...]`.
+  /// Version 2 (written only when a version 1 reader would misread the checkpoint) puts
+  /// `hasAudio, timeCurveGrid, sigmaCount, sigmas...` between the header and the layer rows.
   public var values: [Float] {
+    let isVersion1 = hasAudio && sigmaGrid.isEmpty && timeCurveGrid == 0
     var values: [Float] = [
-      1, endpointGate ?? -1, Float(timeEmbeddingSize), Float(layers.count),
+      isVersion1 ? 1 : 2, endpointGate ?? -1, Float(timeEmbeddingSize), Float(layers.count),
     ]
+    if !isVersion1 {
+      values += [hasAudio ? 1 : 0, Float(timeCurveGrid), Float(sigmaGrid.count)]
+      values += sigmaGrid.map { Float($0) }
+    }
     for layer in layers {
       values.append(Float(layer))
       values += ranks(ofLayer: layer).values.map { Float($0) }
@@ -99,19 +131,33 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   }
 
   public init?(values: [Float]) {
-    guard values.count >= 4, values[0] == 1 else { return nil }
+    guard values.count >= 4, values[0] == 1 || values[0] == 2 else { return nil }
     let count = Int(values[3])
-    guard count > 0, values.count == 4 + count * 7 else { return nil }
+    var offset = 4
+    var hasAudio = true
+    var timeCurveGrid = 0
+    var sigmaGrid = [Double]()
+    if values[0] == 2 {
+      guard values.count >= 7 else { return nil }
+      hasAudio = values[4] != 0
+      timeCurveGrid = Int(values[5])
+      let sigmaCount = Int(values[6])
+      guard sigmaCount >= 0, values.count >= 7 + sigmaCount else { return nil }
+      sigmaGrid = values[7..<(7 + sigmaCount)].map { Double($0) }
+      offset = 7 + sigmaCount
+    }
+    guard count > 0, values.count == offset + count * 7 else { return nil }
     var layers = [Int]()
     var ranks = [Int: Ranks]()
     for i in 0..<count {
-      let row = values[(4 + i * 7)..<(4 + (i + 1) * 7)].map { Int($0) }
+      let row = values[(offset + i * 7)..<(offset + (i + 1) * 7)].map { Int($0) }
       layers.append(row[0])
       ranks[row[0]] = Ranks(q: row[1], k: row[2], v: row[3], o: row[4], fc1: row[5], fc2: row[6])
     }
     self.init(
       layers: layers, ranks: ranks, timeEmbeddingSize: Int(values[2]),
-      endpointGate: values[1] < 0 ? nil : values[1])
+      endpointGate: values[1] < 0 ? nil : values[1], hasAudio: hasAudio, sigmaGrid: sigmaGrid,
+      timeCurveGrid: timeCurveGrid)
   }
 
   public func write(to store: DynamicGraph.Store) {
@@ -176,28 +222,84 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   public static func hyperFlowSigmaGrid(steps: Int) -> [Double]? {
     hyperFlowSigmaGrids[steps]
   }
+
+  /// The checkpoint key holding the `adaln_t_table` of a curve-form checkpoint.
+  public static let timeCurveStoreKey = "minimax_h3_adaln_t_table"
+
+  /// Sampling grids of a PDD checkpoint keyed by step count: its own grid, plus every coarser grid
+  /// that only uses its points (a step then spans several heads, see `headSelector`).
+  public var sigmaGrids: [Int: [Double]] {
+    let heads = sigmaGrid.count - 1
+    guard heads > 1 else { return [:] }
+    var grids = [Int: [Double]]()
+    for steps in 1...heads where heads % steps == 0 {
+      grids[steps] = stride(from: 0, through: heads, by: heads / steps).map { sigmaGrid[$0] }
+    }
+    return grids
+  }
+
+  /// Weights of the stacked output heads for the step from `sigma` to `nextSigma`, following
+  /// ComfyUI's `_pdd_head`: the first head always counts in full (the others are offsets from it)
+  /// and a step takes the dt-weighted mean of the heads of the grid intervals it spans.
+  public func headSelector(sigma: Double, nextSigma: Double) -> [Float] {
+    let heads = outputHeads
+    guard heads > 1 else { return [1] }
+    func nearest(_ value: Double) -> Int {
+      sigmaGrid.indices.min { abs(sigmaGrid[$0] - value) < abs(sigmaGrid[$1] - value) }!
+    }
+    let start = min(nearest(sigma), heads - 1)
+    let stop = max(nearest(nextSigma), start + 1)
+    let deltas = (start..<stop).map { sigmaGrid[$0] - sigmaGrid[$0 + 1] }
+    let total = deltas.reduce(0, +)
+    var selector = [Float](repeating: 0, count: heads)
+    selector[0] = 1
+    for index in max(start, 1)..<stop {
+      selector[index] = Float(deltas[index - start] / total)
+    }
+    return selector
+  }
+
+  /// Rows of the time-embedding curve at `t`, interpolated like ComfyUI's `_time_embedding`.
+  public static func timeCurve(_ table: Tensor<Float>, at t: Float) -> [Float] {
+    let rows = table.shape[0]
+    let size = table.shape[1]
+    let position = min(max(t, 0), 1) * Float(rows - 1)
+    let lower = min(Int(position.rounded(.down)), rows - 2)
+    let fraction = position - Float(lower)
+    return (0..<size).map {
+      table[lower, $0] + (table[lower + 1, $0] - table[lower, $0]) * fraction
+    }
+  }
 }
 
-/// Fixed conditions the H3 fixed encoder returns after the leading text / reference outputs.
+/// Fixed conditions the H3 fixed encoder returns after the leading text / reference outputs. They
+/// end with the output shift and scale of the video and audio streams, or without audio (MiniMax H3
+/// Image) with those of the image and the output-head selector.
 public func MiniMaxH3FixedConditionCount(
-  layers: Int, referenceImageCount: Int, referenceAudioCount: Int
+  layers: Int, referenceImageCount: Int, referenceAudioCount: Int, hasAudio: Bool = true
 ) -> Int {
-  layers * MiniMaxH3PerLayerConditionCount(
-    referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount) + 4
+  layers
+    * MiniMaxH3PerLayerConditionCount(
+      referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount,
+      hasAudio: hasAudio)
+    + (hasAudio ? 4 : 3)
 }
 
-public func MiniMaxH3PerLayerConditionCount(referenceImageCount: Int, referenceAudioCount: Int)
-  -> Int
-{
-  18 + (referenceImageCount > 0 ? 6 : 0) + (referenceAudioCount > 0 ? 6 : 0)
+public func MiniMaxH3PerLayerConditionCount(
+  referenceImageCount: Int, referenceAudioCount: Int, hasAudio: Bool = true
+) -> Int {
+  (hasAudio ? 18 : 12) + (referenceImageCount > 0 ? 6 : 0) + (referenceAudioCount > 0 ? 6 : 0)
 }
 
 /// Recovers the layer count from a fixed-condition count (layouts may drop blocks).
 public func MiniMaxH3LayerCount(
-  fixedConditionCount: Int, referenceImageCount: Int, referenceAudioCount: Int
+  fixedConditionCount: Int, referenceImageCount: Int, referenceAudioCount: Int,
+  hasAudio: Bool = true
 ) -> Int {
   let perLayer = MiniMaxH3PerLayerConditionCount(
-    referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount)
-  precondition(fixedConditionCount > 4 && (fixedConditionCount - 4) % perLayer == 0)
-  return (fixedConditionCount - 4) / perLayer
+    referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount,
+    hasAudio: hasAudio)
+  let tail = hasAudio ? 4 : 3
+  precondition(fixedConditionCount > tail && (fixedConditionCount - tail) % perLayer == 0)
+  return (fixedConditionCount - tail) / perLayer
 }

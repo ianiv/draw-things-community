@@ -184,7 +184,7 @@ public struct ImageGeneratorUtils {
       .qwenImage, .qwenImage2_1, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
       .mossImage,
       .cosmos2_5_2b, .cosmos2_5_2_9b,
-      .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2:
+      .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .minimaxH3Image:
       return false
     case .hunyuanVideo, .svdI2v, .wan21_1_3b, .wan21_14b, .wan22_5b, .ltx2, .ltx2_3,
       .longcatVideoAvatar1_5, .minimaxH3:
