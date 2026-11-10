@@ -425,9 +425,16 @@ struct Converter: ParsableCommand {
           let qkvWeight = values(try read("\(prefix).attn.to_qkv.weight"))
           let qkvBias = values(try read("\(prefix).attn.to_qkv.bias"))
           for (index, projection) in ["to_q", "to_k", "to_v"].enumerated() {
-            var weight = Array(
-              qkvWeight[(index * hiddenSize * hiddenSize)..<((index + 1) * hiddenSize * hiddenSize)])
-            var bias = Array(qkvBias[(index * hiddenSize)..<((index + 1) * hiddenSize)])
+            // The reference views the output as [heads, 3 * 64] and chunks it, so each head's
+            // query, key and value rows sit together.
+            var weight = [Float]()
+            var bias = [Float]()
+            weight.reserveCapacity(hiddenSize * hiddenSize)
+            for head in 0..<(hiddenSize / 64) {
+              let row = head * 192 + index * 64
+              weight.append(contentsOf: qkvWeight[(row * hiddenSize)..<((row + 64) * hiddenSize)])
+              bias.append(contentsOf: qkvBias[row..<(row + 64)])
+            }
             if index < 2 {
               weight = interleave(weight, rows: hiddenSize)
               bias = interleave(bias, rows: hiddenSize)
