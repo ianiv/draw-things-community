@@ -290,16 +290,17 @@ extension TextEncoder {
     let outputKey = miniMaxH3TextEncoderOutputKey(
       images: usesImages ? images : [], tokens: tokens[0], originalTokenLength: originalTokenLength,
       tokenLengthUncond: tokenLengthUncond, tokenLengthCond: tokenLengthCond, modifier: modifier)
-    if let outputKey = outputKey, let cached = weightsCache.textEncoderOutput {
-      if cached.key == AnyHashable(outputKey) {
+    if let cached = weightsCache.textEncoderOutput {
+      if let outputKey = outputKey, cached.key == AnyHashable(outputKey) {
         weightsCache.textEncoderOutputHits += 1
         tokenLengthUncond += cached.tokenLengthChange
         tokenLengthCond += cached.tokenLengthChange
-        // No text model on a hit. `ModelPreloader.consumeTextModels` only reads the models when
-        // the preloader is enabled, which is for SD-family models alone, never H3.
+        // No text model on a hit: `ModelPreloader.consumeTextModels` keeps one only when it gets
+        // one.
         return (cached.outputs.map { graph.variable(Tensor<FloatType>($0).toGPU(0)) }, [])
       }
-      // A different prompt replaces it after this run; don't hold the old one meanwhile.
+      // A different prompt (or one that can't be kept) replaces it after this run; don't hold the
+      // old encoding and its key's image bytes meanwhile.
       weightsCache.textEncoderOutput = nil
     }
     if usesImages {

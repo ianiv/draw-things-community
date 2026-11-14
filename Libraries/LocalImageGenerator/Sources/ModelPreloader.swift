@@ -1249,8 +1249,11 @@ extension ModelPreloader {
   )
     -> [DynamicGraph.Tensor<FloatType>]
   {
-    if (mode == .preload || mode == .yes) && isEnabled {
-      textModel = x.1[0]
+    // A text encoder that reused a kept encoding returns no models (MiniMax H3's, see
+    // `WeightsCache.textEncoderOutput`), and `isEnabled` follows the preloaded model file, which
+    // needn't be the model this run encodes for.
+    if (mode == .preload || mode == .yes) && isEnabled, let model = x.1.first {
+      textModel = model
       textEncoderFilePaths = textEncoder.filePaths
       textEncoderVersion = textEncoder.version
       textEncoderIsCfgEnabled = textEncoder.isCfgEnabled

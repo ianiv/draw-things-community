@@ -5549,9 +5549,7 @@ extension LocalImageGenerator {
       } ?? ImageGeneratorUtils.defaultAutoencoder
     let isGuidanceEmbedEnabled =
       ModelZoo.guidanceEmbedForModel(file) && configuration.speedUpWithGuidanceEmbed
-    // MiniMax H3 Image is CFG-distilled, so it always runs without CFG, as `isCfgEnabled` in
-    // Sampler.swift says. The text encoder and the samplers must agree on that: otherwise the
-    // samplers trim a CFG-sized conditioning and keep the wrong rotary rows.
+    // H3 Image never uses CFG; see generateTextOnly.
     var isCfgEnabled =
       !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
       && modelVersion != .minimaxH3Image
@@ -7077,9 +7075,7 @@ extension LocalImageGenerator {
       } ?? ImageGeneratorUtils.defaultAutoencoder
     let isGuidanceEmbedEnabled =
       ModelZoo.guidanceEmbedForModel(file) && configuration.speedUpWithGuidanceEmbed
-    // MiniMax H3 Image is CFG-distilled, so it always runs without CFG, as `isCfgEnabled` in
-    // Sampler.swift says. The text encoder and the samplers must agree on that: otherwise the
-    // samplers trim a CFG-sized conditioning and keep the wrong rotary rows.
+    // H3 Image never uses CFG; see generateTextOnly.
     var isCfgEnabled =
       !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
       && modelVersion != .minimaxH3Image
@@ -8048,9 +8044,7 @@ extension LocalImageGenerator {
       } ?? ImageGeneratorUtils.defaultAutoencoder
     let isGuidanceEmbedEnabled =
       ModelZoo.guidanceEmbedForModel(file) && configuration.speedUpWithGuidanceEmbed
-    // MiniMax H3 Image is CFG-distilled, so it always runs without CFG, as `isCfgEnabled` in
-    // Sampler.swift says. The text encoder and the samplers must agree on that: otherwise the
-    // samplers trim a CFG-sized conditioning and keep the wrong rotary rows.
+    // H3 Image never uses CFG; see generateTextOnly.
     var isCfgEnabled =
       !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
       && modelVersion != .minimaxH3Image
