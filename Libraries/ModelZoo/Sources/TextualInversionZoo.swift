@@ -67,7 +67,7 @@ public struct TextualInversionZoo: DownloadZoo {
   public static let builtinSpecifications: [Specification] = []
 
   private static let builtinModelsAndAvailableSpecifications: (Set<String>, [Specification]) = {
-    let jsonFile = filePathForModelDownloaded("custom_textual_inversions.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_textual_inversions.json")
     guard let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) else {
       return (Set(builtinSpecifications.map { $0.file }), builtinSpecifications)
     }
@@ -135,7 +135,7 @@ public struct TextualInversionZoo: DownloadZoo {
   public static func appendCustomSpecification(_ specification: Specification) {
     dispatchPrecondition(condition: .onQueue(.main))
     var customSpecifications = [Specification]()
-    let jsonFile = TextualInversionZoo.filePathForModelDownloaded("custom_textual_inversions.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_textual_inversions.json")
     if let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) {
       let jsonDecoder = JSONDecoder()
       jsonDecoder.keyDecodingStrategy = .convertFromSnakeCase

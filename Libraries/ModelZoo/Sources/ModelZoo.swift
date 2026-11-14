@@ -2221,7 +2221,7 @@ public struct ModelZoo: DownloadZoo {
   ]
 
   private static let builtinModelsAndAvailableSpecifications: (Set<String>, [Specification]) = {
-    let jsonFile = filePathForModelDownloaded("custom.json")
+    let jsonFile = filePathForCustomSpecifications("custom.json")
     guard let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) else {
       return (Set(builtinSpecifications.map { $0.file }), builtinSpecifications)
     }
@@ -2416,6 +2416,21 @@ public struct ModelZoo: DownloadZoo {
         }
       #endif
     }
+  }
+
+  /// The order to look through `externalUrls` for a file that's already there, when it should
+  /// differ from theirs (an app may prefer a faster drive). Folders here that aren't in
+  /// `externalUrls` are ignored, and ones missing from it are looked in last, so only the order
+  /// changes. Writing a new file still goes to `externalUrls.first`. Nil keeps `externalUrls`
+  /// order.
+  public static var lookupUrlsOrder: [URL]? = nil
+
+  /// `externalUrls` in the order existing files are looked for (`lookupUrlsOrder`).
+  public static var lookupUrls: [URL] {
+    let externalUrls = externalUrls
+    guard let order = lookupUrlsOrder else { return externalUrls }
+    let ordered = order.filter { externalUrls.contains($0) }
+    return ordered + externalUrls.filter { !ordered.contains($0) }
   }
 
   public static func specificationForHumanReadableModel(_ name: String) -> Specification? {
@@ -2697,7 +2712,20 @@ public struct ModelZoo: DownloadZoo {
     return modelZooUrl.appendingPathComponent(name).path
   }
 
+  /// Where a model file is read from: the first of `lookupUrls` that has it (after
+  /// Documents/Models unless `isExternalUrlsPreferred`), else where it would be written, the first
+  /// of `externalUrls`.
   public static func filePathForModelDownloaded(_ name: String) -> String {
+    return filePathForModelDownloaded(name, searching: lookupUrls)
+  }
+
+  /// Where a `custom*.json` list is read and rewritten: found in `externalUrls` order, ignoring
+  /// `lookupUrlsOrder`, so a reordered lookup doesn't move edits to another folder's list.
+  public static func filePathForCustomSpecifications(_ name: String) -> String {
+    return filePathForModelDownloaded(name, searching: externalUrls)
+  }
+
+  private static func filePathForModelDownloaded(_ name: String, searching urls: [URL]) -> String {
     guard let externalUrl = externalUrls.first else {
       return internalFilePathForModelDownloaded(name)
     }
@@ -2706,7 +2734,7 @@ public struct ModelZoo: DownloadZoo {
     if !isExternalUrlsPreferred && fileManager.fileExists(atPath: otherFilePath) {
       return otherFilePath
     }
-    for externalUrl in externalUrls {
+    for externalUrl in urls {
       let filePath = externalUrl.appendingPathComponent(name).path
       if fileManager.fileExists(atPath: filePath) {
         return filePath

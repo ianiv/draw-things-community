@@ -100,7 +100,7 @@ public struct ConfigurationZoo {
   // MARK: - Custom Configurations (Local)
 
   public static var availableSpecifications: [Specification] = {
-    let jsonFile = filePathForModelDownloaded("custom_configs.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_configs.json")
     guard let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) else {
       return []
     }
@@ -172,7 +172,7 @@ public struct ConfigurationZoo {
       let jsonData = try? JSONSerialization.data(
         withJSONObject: customSpecifications, options: [.prettyPrinted, .sortedKeys])
     else { return }
-    let jsonFile = filePathForModelDownloaded("custom_configs.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_configs.json")
     do {
       try jsonData.write(to: URL(fileURLWithPath: jsonFile), options: .atomic)
       // If succeed. We can remove all configurations from the workspace.
@@ -205,7 +205,7 @@ public struct ConfigurationZoo {
   public static func appendCustomSpecification(_ specification: Specification) {
     dispatchPrecondition(condition: .onQueue(.main))
     var customSpecifications = [[String: Any]]()
-    let jsonFile = filePathForModelDownloaded("custom_configs.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_configs.json")
     if let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) {
       if let jsonSpecifications = try? JSONSerialization.jsonObject(with: jsonData)
         as? [[String: Any]]
@@ -258,7 +258,7 @@ public struct ConfigurationZoo {
   public static func remove(by nameToRemove: String) {
     dispatchPrecondition(condition: .onQueue(.main))
     var customSpecifications = [[String: Any]]()
-    let jsonFile = filePathForModelDownloaded("custom_configs.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_configs.json")
     if let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) {
       if let jsonSpecifications = try? JSONSerialization.jsonObject(with: jsonData)
         as? [[String: Any]]

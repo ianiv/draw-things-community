@@ -56,7 +56,7 @@ public struct UpscalerZoo: DownloadZoo {
   }
 
   private static let builtinModelsAndAvailableSpecifications: (Set<String>, [Specification]) = {
-    let jsonFile = filePathForModelDownloaded("custom_upscaler.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_upscaler.json")
     guard let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) else {
       return (Set(builtinSpecifications.map { $0.file }), builtinSpecifications)
     }
@@ -107,7 +107,7 @@ public struct UpscalerZoo: DownloadZoo {
   public static func appendCustomSpecification(_ specification: Specification) {
     dispatchPrecondition(condition: .onQueue(.main))
     var customSpecifications = [Specification]()
-    let jsonFile = filePathForModelDownloaded("custom_upscaler.json")
+    let jsonFile = ModelZoo.filePathForCustomSpecifications("custom_upscaler.json")
     if let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonFile)) {
       let jsonDecoder = JSONDecoder()
       jsonDecoder.keyDecodingStrategy = .convertFromSnakeCase
