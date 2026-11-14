@@ -154,7 +154,9 @@ extension DDIMSampler: Sampler {
       isCfgEnabled: isCfgEnabled, textGuidanceScale: textGuidanceScale, modifier: modifier)
     var extraProjection = extraProjection
     var tokenLengthUncond = tokenLengthUncond
-    if !isCfgEnabled && version != .svdI2v && version != .minimaxH3 {
+    if !isCfgEnabled && version != .svdI2v && version != .minimaxH3
+      && version != .minimaxH3Image
+    {
       for i in 0..<c.count {
         let shape = c[i].shape
         guard shape[0] >= batchSize * 2 else { continue }

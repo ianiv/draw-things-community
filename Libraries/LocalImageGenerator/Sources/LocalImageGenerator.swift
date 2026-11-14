@@ -4110,7 +4110,12 @@ extension LocalImageGenerator {
     // Always enable for Hunyuan.
     let isGuidanceEmbedEnabled =
       ModelZoo.guidanceEmbedForModel(file) && configuration.speedUpWithGuidanceEmbed
-    var isCfgEnabled = !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+    // MiniMax H3 Image is CFG-distilled, so it always runs without CFG, as `isCfgEnabled` in
+    // Sampler.swift says. The text encoder and the samplers must agree on that: otherwise the
+    // samplers trim a CFG-sized conditioning and keep the wrong rotary rows.
+    var isCfgEnabled =
+      !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+      && modelVersion != .minimaxH3Image
     let latentsScaling = ModelZoo.latentsScalingForModel(file)
     let noiseScalingFactor = ModelZoo.noiseScalingFactorForModel(file)
     let paddedTextEncodingLength = ModelZoo.paddedTextEncodingLengthForModel(file)
@@ -5544,7 +5549,12 @@ extension LocalImageGenerator {
       } ?? ImageGeneratorUtils.defaultAutoencoder
     let isGuidanceEmbedEnabled =
       ModelZoo.guidanceEmbedForModel(file) && configuration.speedUpWithGuidanceEmbed
-    var isCfgEnabled = !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+    // MiniMax H3 Image is CFG-distilled, so it always runs without CFG, as `isCfgEnabled` in
+    // Sampler.swift says. The text encoder and the samplers must agree on that: otherwise the
+    // samplers trim a CFG-sized conditioning and keep the wrong rotary rows.
+    var isCfgEnabled =
+      !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+      && modelVersion != .minimaxH3Image
     let latentsScaling = ModelZoo.latentsScalingForModel(file)
     let paddedTextEncodingLength = ModelZoo.paddedTextEncodingLengthForModel(file)
     let conditioning = ModelZoo.conditioningForModel(file)
@@ -7067,7 +7077,12 @@ extension LocalImageGenerator {
       } ?? ImageGeneratorUtils.defaultAutoencoder
     let isGuidanceEmbedEnabled =
       ModelZoo.guidanceEmbedForModel(file) && configuration.speedUpWithGuidanceEmbed
-    var isCfgEnabled = !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+    // MiniMax H3 Image is CFG-distilled, so it always runs without CFG, as `isCfgEnabled` in
+    // Sampler.swift says. The text encoder and the samplers must agree on that: otherwise the
+    // samplers trim a CFG-sized conditioning and keep the wrong rotary rows.
+    var isCfgEnabled =
+      !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+      && modelVersion != .minimaxH3Image
     let latentsScaling = ModelZoo.latentsScalingForModel(file)
     let paddedTextEncodingLength = ModelZoo.paddedTextEncodingLengthForModel(file)
     let conditioning = ModelZoo.conditioningForModel(file)
@@ -8033,7 +8048,12 @@ extension LocalImageGenerator {
       } ?? ImageGeneratorUtils.defaultAutoencoder
     let isGuidanceEmbedEnabled =
       ModelZoo.guidanceEmbedForModel(file) && configuration.speedUpWithGuidanceEmbed
-    var isCfgEnabled = !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+    // MiniMax H3 Image is CFG-distilled, so it always runs without CFG, as `isCfgEnabled` in
+    // Sampler.swift says. The text encoder and the samplers must agree on that: otherwise the
+    // samplers trim a CFG-sized conditioning and keep the wrong rotary rows.
+    var isCfgEnabled =
+      !ModelZoo.isConsistencyModelForModel(file) && !isGuidanceEmbedEnabled
+      && modelVersion != .minimaxH3Image
     let latentsScaling = ModelZoo.latentsScalingForModel(file)
     let paddedTextEncodingLength = ModelZoo.paddedTextEncodingLengthForModel(file)
     let conditioning = ModelZoo.conditioningForModel(file)

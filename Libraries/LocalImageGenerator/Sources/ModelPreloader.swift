@@ -473,6 +473,8 @@ extension ModelPreloader {
     textEncoderLoRA = nil
     textEncoderFilePaths = nil
     textEncoderIsCfgEnabled = nil
+    // The kept prompt encoding goes with the models it came from.
+    weightsCache.removeTextEncoderOutput()
   }
 
   private func preloadIfPossible() {

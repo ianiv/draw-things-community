@@ -345,8 +345,11 @@ extension UNetFixedEncoder {
         rotary[batch..<(batch + 1), 0..<length, 0..<1, 0..<128] =
           textEncoding[1][contextBatch, 0..<length, 0..<1, 0..<128]
         let visionOffset = textLength + referenceLength + audioRows
-        rotary[batch..<(batch + 1), textLength..<visionOffset, 0..<1, 0..<128] =
-          embedding[0..<1, 0..<(referenceLength + audioRows), 0..<1, 0..<128]
+        // Text-only H3 Image runs have no reference or audio rows; an empty 0..<0 slice asserts.
+        if referenceLength + audioRows > 0 {
+          rotary[batch..<(batch + 1), textLength..<visionOffset, 0..<1, 0..<128] =
+            embedding[0..<1, 0..<(referenceLength + audioRows), 0..<1, 0..<128]
+        }
         if visionLength > 0 {
           rotary[
             batch..<(batch + 1), visionOffset..<(visionOffset + visionLength), 0..<1, 0..<128] =

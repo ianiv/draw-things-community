@@ -16,11 +16,21 @@ public final class WeightsCache {
   private var map: [String: Item]
   public var maxTotalCacheSize: UInt64 {  // Maximum number of items in the cache
     didSet {
+      // Clear on every set, not only when the limit shrinks: setting the limit to 0 and back is
+      // how a host empties the cache, and the encoded prompt should go with the weights.
+      textEncoderOutput = nil
       guard maxTotalCacheSize < oldValue else { return }
       evict(for: 0)  // Trigger eviction logic.
     }
   }
   public let memorySubsystem: MemorySubsystem
+  /// The last prompt encoding a text encoder chose to keep (MiniMax H3 and H3 Image), as CPU
+  /// tensors. Re-encoding the same prompt and references with Qwen is the slowest part of a
+  /// repeated H3 run, and every run builds a new DynamicGraph, so graph tensors can't be kept.
+  /// One slot is enough: the common case is generating the same prompt again.
+  public var textEncoderOutput: TextEncoderOutput? = nil
+  /// How many times `textEncoderOutput` was reused instead of running the text encoder.
+  public var textEncoderOutputHits: Int = 0
   private var timestamp: Int64
   private var currentTotalSize: UInt64  // Optional: if you also have a total size limit
 
@@ -87,6 +97,11 @@ public final class WeightsCache {
   public func removeAll() {
     map.removeAll()
     heap = Heap()
+    textEncoderOutput = nil
+  }
+
+  public func removeTextEncoderOutput() {
+    textEncoderOutput = nil
   }
 
   // Evict the smallest item if the cache is over capacity
@@ -110,6 +125,22 @@ public final class WeightsCache {
   // Get the current total size of items in the cache
   public var totalSize: UInt64 {
     return currentTotalSize
+  }
+}
+
+extension WeightsCache {
+  /// A text encoder's outputs, kept on the CPU, with the key that produced them. The key is
+  /// whatever the text encoder needs to compare (its type is private to the encoder), and
+  /// `tokenLengthChange` is how much the encoder changed the incoming token lengths.
+  public struct TextEncoderOutput {
+    public var key: AnyHashable
+    public var outputs: [AnyTensor]
+    public var tokenLengthChange: Int
+    public init(key: AnyHashable, outputs: [AnyTensor], tokenLengthChange: Int) {
+      self.key = key
+      self.outputs = outputs
+      self.tokenLengthChange = tokenLengthChange
+    }
   }
 }
 

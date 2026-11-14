@@ -45,6 +45,30 @@ public struct TextEncoder<FloatType: TensorNumeric & BinaryFloatingPoint> {
   }
 }
 
+/// Everything a MiniMax H3 / H3 Image prompt encoding depends on, so a repeated run can reuse
+/// the last one from `WeightsCache.textEncoderOutput` instead of running the vision tower and
+/// Qwen again. The text encoder file is identified by its size and modification date as well as
+/// its path, so a replaced file at the same path is a miss. Reference images are compared by
+/// their exact bytes. LoRAs don't touch the H3 text encoder (`encodeMiniMaxH3` never opens
+/// them); if they ever do, they must join this key.
+private struct MiniMaxH3TextEncoderOutputKey: Hashable {
+  var filePath: String
+  var fileSize: UInt64
+  var fileModificationDate: Date
+  var version: ModelVersion
+  var modifier: SamplerModifier
+  var isCfgEnabled: Bool
+  var usesFlashAttention: Bool
+  var floatType: ObjectIdentifier
+  /// The token IDs that are encoded: both halves with CFG, the conditional half without.
+  var tokens: [Int32]
+  /// Only part of the key with CFG on; without CFG the unconditional half is never encoded.
+  var tokenLengthUncond: Int?
+  var tokenLengthCond: Int
+  var imageShapes: [[Int]]
+  var imageBytes: [Data]
+}
+
 extension TextEncoder {
   private func encodeFibo2(
     images: [DynamicGraph.Tensor<FloatType>], tokens: [DynamicGraph.Tensor<Int32>],
@@ -261,7 +285,24 @@ extension TextEncoder {
     var imageFeatures = [DynamicGraph.Tensor<FloatType>]()
     // MiniMax H3 Image shows Qwen every reference picture, whatever the modifier.
     let isImageModel = version == .minimaxH3Image
-    if (modifier == .fl2va || modifier == .ref2va || isImageModel) && !images.isEmpty {
+    let usesImages = (modifier == .fl2va || modifier == .ref2va || isImageModel) && !images.isEmpty
+    let incomingTokenLengthCond = tokenLengthCond
+    let outputKey = miniMaxH3TextEncoderOutputKey(
+      images: usesImages ? images : [], tokens: tokens[0], originalTokenLength: originalTokenLength,
+      tokenLengthUncond: tokenLengthUncond, tokenLengthCond: tokenLengthCond, modifier: modifier)
+    if let outputKey = outputKey, let cached = weightsCache.textEncoderOutput {
+      if cached.key == AnyHashable(outputKey) {
+        weightsCache.textEncoderOutputHits += 1
+        tokenLengthUncond += cached.tokenLengthChange
+        tokenLengthCond += cached.tokenLengthChange
+        // No text model on a hit. `ModelPreloader.consumeTextModels` only reads the models when
+        // the preloader is enabled, which is for SD-family models alone, never H3.
+        return (cached.outputs.map { graph.variable(Tensor<FloatType>($0).toGPU(0)) }, [])
+      }
+      // A different prompt replaces it after this run; don't hold the old one meanwhile.
+      weightsCache.textEncoderOutput = nil
+    }
+    if usesImages {
       let tokenIDs = tokens[0].rawValue.toCPU()
       imageStarts = (0..<tokenLengthCond).filter {
         tokenIDs[originalTokenLength + $0] == 151_655
@@ -499,7 +540,12 @@ extension TextEncoder {
     }
     tokenLengthUncond -= visionLength
     tokenLengthCond -= visionLength
-    guard !visionRanges.isEmpty else { return ([encoding, rotary], [textModel]) }
+    guard !visionRanges.isEmpty else {
+      keepMiniMaxH3TextEncoderOutput(
+        [encoding, rotary], key: outputKey,
+        tokenLengthChange: tokenLengthCond - incomingTokenLengthCond)
+      return ([encoding, rotary], [textModel])
+    }
     // Qwen remains causal in the original presentation order. Pack its output once for H3,
     // keeping the corresponding rotary rows alongside it, including unequal CFG padding.
     var textRows = [DynamicGraph.Tensor<FloatType>]()
@@ -516,7 +562,62 @@ extension TextEncoder {
     textRows += visionRanges.map { encoding[0..<batchSize, $0, 0..<5_120].copied() }
     let context = Concat(axis: 1)(inputs: textRows[0], Array(textRows.dropFirst()))[0].as(
       of: FloatType.self)
+    keepMiniMaxH3TextEncoderOutput(
+      [context, rotary], key: outputKey,
+      tokenLengthChange: tokenLengthCond - incomingTokenLengthCond)
     return ([context, rotary], [textModel])
+  }
+
+  /// Builds the key for `encodeMiniMaxH3`'s output, or nil when it shouldn't be kept: the text
+  /// encoder file can't be read, or the reference images would take more than about 64 MB to
+  /// keep for comparison.
+  private func miniMaxH3TextEncoderOutputKey(
+    images: [DynamicGraph.Tensor<FloatType>], tokens: DynamicGraph.Tensor<Int32>,
+    originalTokenLength: Int, tokenLengthUncond: Int, tokenLengthCond: Int,
+    modifier: SamplerModifier
+  ) -> MiniMaxH3TextEncoderOutputKey? {
+    let imageByteCount = images.reduce(0) {
+      $0 + $1.shape.reduce(1, *) * MemoryLayout<FloatType>.size
+    }
+    guard imageByteCount <= 64 * 1_024 * 1_024,
+      let attributes = try? FileManager.default.attributesOfItem(atPath: filePaths[0]),
+      let fileSize = (attributes[.size] as? NSNumber)?.uint64Value,
+      let fileModificationDate = attributes[.modificationDate] as? Date
+    else { return nil }
+    let tokenIDs = tokens.rawValue.toCPU()
+    // The same slice `encodeMiniMaxH3` feeds Qwen.
+    let encodedRange = (isCfgEnabled ? 0 : originalTokenLength)..<(originalTokenLength * 2)
+    let encodedTokens = encodedRange.map { tokenIDs[$0] }
+    var imageShapes = [[Int]]()
+    var imageBytes = [Data]()
+    for image in images {
+      imageShapes.append(Array(image.shape))
+      let bytes = image.rawValue.toCPU().contiguous()
+      imageBytes.append(bytes.withUnsafeBytes { Data($0) })
+    }
+    return MiniMaxH3TextEncoderOutputKey(
+      filePath: filePaths[0], fileSize: fileSize, fileModificationDate: fileModificationDate,
+      version: version, modifier: modifier, isCfgEnabled: isCfgEnabled,
+      usesFlashAttention: usesFlashAttention, floatType: ObjectIdentifier(FloatType.self),
+      tokens: encodedTokens, tokenLengthUncond: isCfgEnabled ? tokenLengthUncond : nil,
+      tokenLengthCond: tokenLengthCond, imageShapes: imageShapes, imageBytes: imageBytes)
+  }
+
+  /// Keeps CPU copies of `encodeMiniMaxH3`'s outputs. Every run makes a new DynamicGraph, so
+  /// graph tensors can't outlive it; a hit wraps these copies in the new run's graph. Nothing is
+  /// kept while the weights cache is turned off.
+  private func keepMiniMaxH3TextEncoderOutput(
+    _ outputs: [DynamicGraph.Tensor<FloatType>], key: MiniMaxH3TextEncoderOutputKey?,
+    tokenLengthChange: Int
+  ) {
+    guard let key = key, weightsCache.maxTotalCacheSize > 0 else { return }
+    weightsCache.textEncoderOutput = WeightsCache.TextEncoderOutput(
+      key: AnyHashable(key),
+      outputs: outputs.map {
+        let tensor = $0.rawValue
+        // A CPU tensor's toCPU() is itself, which would keep this run's graph alive.
+        return tensor.kind == .CPU ? tensor.copied() : tensor.toCPU()
+      }, tokenLengthChange: tokenLengthChange)
   }
 
   private func encodeHiDreamO1(
