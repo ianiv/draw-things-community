@@ -140,4 +140,68 @@ final class ModelZooTests: XCTestCase {
     XCTAssertEqual(scalingOnly.audioMean, specification.audioLatentsMean)
     XCTAssertEqual(scalingOnly.audioStd, specification.audioLatentsStd)
   }
+
+  private func withLookup(
+    externalUrls: [URL], order: [URL]?, preferred: Bool = false, _ body: () throws -> Void
+  ) rethrows {
+    let previousUrls = ModelZoo.externalUrls
+    let previousOrder = ModelZoo.lookupUrlsOrder
+    let previousPreference = ModelZoo.isExternalUrlsPreferred
+    defer {
+      ModelZoo.externalUrls = previousUrls
+      ModelZoo.lookupUrlsOrder = previousOrder
+      ModelZoo.isExternalUrlsPreferred = previousPreference
+    }
+    ModelZoo.externalUrls = externalUrls
+    ModelZoo.lookupUrlsOrder = order
+    ModelZoo.isExternalUrlsPreferred = preferred
+    try body()
+  }
+
+  func testLookupUrlsWithoutOrderAreExternalUrls() {
+    let a = URL(fileURLWithPath: "/lookup/a", isDirectory: true)
+    let b = URL(fileURLWithPath: "/lookup/b", isDirectory: true)
+    withLookup(externalUrls: [a, b], order: nil) {
+      XCTAssertEqual(ModelZoo.lookupUrls, [a, b])
+    }
+  }
+
+  func testLookupUrlsDropUnknownFoldersAndAppendUnorderedOnes() {
+    let a = URL(fileURLWithPath: "/lookup/a", isDirectory: true)
+    let b = URL(fileURLWithPath: "/lookup/b", isDirectory: true)
+    let c = URL(fileURLWithPath: "/lookup/c", isDirectory: true)
+    let gone = URL(fileURLWithPath: "/lookup/gone", isDirectory: true)
+    withLookup(externalUrls: [a, b, c], order: [gone, c, a]) {
+      XCTAssertEqual(ModelZoo.lookupUrls, [c, a, b])
+    }
+  }
+
+  func testLookupOrderMovesModelFilesButNotCustomSpecifications() throws {
+    let fileManager = FileManager.default
+    let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+      UUID().uuidString, isDirectory: true)
+    let first = root.appendingPathComponent("first", isDirectory: true)
+    let second = root.appendingPathComponent("second", isDirectory: true)
+    try fileManager.createDirectory(at: first, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: second, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: root) }
+    let model = "lookup-\(UUID().uuidString).ckpt"
+    let list = "custom-lookup-\(UUID().uuidString).json"
+    for folder in [first, second] {
+      for name in [model, list] {
+        XCTAssertTrue(
+          fileManager.createFile(atPath: folder.appendingPathComponent(name).path, contents: Data()))
+      }
+    }
+    // Preferred, so Documents/Models isn't looked in first.
+    withLookup(externalUrls: [first, second], order: [second], preferred: true) {
+      XCTAssertEqual(
+        ModelZoo.filePathForModelDownloaded(model), second.appendingPathComponent(model).path)
+      XCTAssertEqual(
+        ModelZoo.filePathForCustomSpecifications(list), first.appendingPathComponent(list).path)
+      let missing = "lookup-missing-\(UUID().uuidString).ckpt"
+      XCTAssertEqual(
+        ModelZoo.filePathForModelDownloaded(missing), first.appendingPathComponent(missing).path)
+    }
+  }
 }

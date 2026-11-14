@@ -198,10 +198,6 @@ public struct ConfigurationZoo {
     return specificationMapping[name]
   }
 
-  private static func filePathForModelDownloaded(_ name: String) -> String {
-    return ModelZoo.filePathForModelDownloaded(name)
-  }
-
   public static func appendCustomSpecification(_ specification: Specification) {
     dispatchPrecondition(condition: .onQueue(.main))
     var customSpecifications = [[String: Any]]()

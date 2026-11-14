@@ -167,7 +167,9 @@ public struct LLMZoo: DownloadZoo {
     if fileManager.fileExists(atPath: internalFilePath) {
       return internalFilePath
     }
-    for externalUrl in externalUrls {
+    // Looked for in the same order as model files (`ModelZoo.lookupUrlsOrder`); a file in none
+    // still goes to the first of `externalUrls`.
+    for externalUrl in ModelZoo.lookupOrdered(externalUrls) {
       let filePath = externalUrl.appendingPathComponent(name).path
       if fileManager.fileExists(atPath: filePath) {
         return filePath

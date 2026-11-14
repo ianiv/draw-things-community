@@ -2427,10 +2427,15 @@ public struct ModelZoo: DownloadZoo {
 
   /// `externalUrls` in the order existing files are looked for (`lookupUrlsOrder`).
   public static var lookupUrls: [URL] {
-    let externalUrls = externalUrls
-    guard let order = lookupUrlsOrder else { return externalUrls }
-    let ordered = order.filter { externalUrls.contains($0) }
-    return ordered + externalUrls.filter { !ordered.contains($0) }
+    return lookupOrdered(externalUrls)
+  }
+
+  /// `urls` reordered by `lookupUrlsOrder`: the ones it names first, in its order, then the rest
+  /// in theirs. Also orders `LLMZoo.externalUrls`, which apps set to the same folders.
+  public static func lookupOrdered(_ urls: [URL]) -> [URL] {
+    guard let order = lookupUrlsOrder else { return urls }
+    let ordered = order.filter { urls.contains($0) }
+    return ordered + urls.filter { !ordered.contains($0) }
   }
 
   public static func specificationForHumanReadableModel(_ name: String) -> Specification? {
