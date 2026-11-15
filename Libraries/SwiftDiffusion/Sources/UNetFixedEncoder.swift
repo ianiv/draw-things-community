@@ -370,7 +370,11 @@ extension UNetFixedEncoder {
         graph.openStore(
           filePath, flags: .readOnly, externalStore: TensorData.externalStore(filePath: filePath)
         ) {
-          timeCurve = $0.read(MiniMaxH3Layout.timeCurveStoreKey).map { Tensor<Float>(from: $0) }
+          // `TensorData.makeExternalData` moves every 2-D tensor, this table included, into the
+          // -tensordata file when JIT weights loading is on, so it must be read as external data.
+          timeCurve = $0.read(MiniMaxH3Layout.timeCurveStoreKey, codec: [.externalData]).map {
+            Tensor<Float>(from: $0)
+          }
         }
         precondition(timeCurve != nil)
       }
