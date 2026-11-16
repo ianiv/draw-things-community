@@ -201,6 +201,18 @@ extension LocalImageGenerator {
     // samplers below, and the head selector blends heads for whatever sigmas they step through.
     let h3ImageGrids =
       version == .minimaxH3Image && type == .dDIMTrailing ? h3Layout.sigmaGrids : [:]
+    // Karras spacing (rho 7) down to sigma 0 spends most steps far below the lowest noise MiniMax
+    // H3 Image ever takes as input (the last nonzero point of its grid, about 0.23): at 8 steps
+    // five of them sit under 0.04, and the image came out as a web of noise, while DPM++ 2M on the
+    // trailing schedule is clean. So its Karras schedule ends at that point, as Karras schedules
+    // of discrete models end at their lowest trained sigma (`KarrasDiscretization.init`).
+    var karrasParameterization = parameterization
+    if version == .minimaxH3Image, case .rf(var rf) = parameterization,
+      let floor = h3Layout.sigmaGrid.dropLast().last, floor > rf.sigmaMin
+    {
+      rf.sigmaMin = floor
+      karrasParameterization = .rf(rf)
+    }
     if (version == .minimaxH3 && h3Layout.isTwoTime) || !h3ImageGrids.isEmpty {
       return DDIMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.RFSigmaGridDiscretization>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
@@ -445,7 +457,8 @@ extension LocalImageGenerator {
         conditioning: conditioning,
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
         cfgZeroStar: cfgZeroStar, isBF16: isBF16,
-        discretization: Denoiser.KarrasDiscretization(parameterization, objective: objective),
+        discretization: Denoiser.KarrasDiscretization(
+          karrasParameterization, objective: objective),
         weightsCache: weightsCache)
     case .DPMPP2MAYS:
       if samplingTimesteps.isEmpty && samplingSigmas.isEmpty {
@@ -777,7 +790,8 @@ extension LocalImageGenerator {
         conditioning: conditioning,
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
         cfgZeroStar: cfgZeroStar, isBF16: isBF16,
-        discretization: Denoiser.KarrasDiscretization(parameterization, objective: objective),
+        discretization: Denoiser.KarrasDiscretization(
+          karrasParameterization, objective: objective),
         weightsCache: weightsCache)
     case .dPMPPSDETrailing:
       return DPMPPSDESampler<FloatType, UNetWrapper<FloatType>, Denoiser.LinearDiscretization>(
