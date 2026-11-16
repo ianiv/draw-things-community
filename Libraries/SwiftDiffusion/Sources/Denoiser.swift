@@ -264,12 +264,14 @@ extension Denoiser {
         // This is for Legacy discrete DDPM. The timestep is scaled already.
         return timestep(for: alphaCumprod, in: sigmas)
       }
-      let sigma: Double
-      if rf {
-        sigma = 1 - alphaCumprod
-      } else {
-        sigma = ((1 - alphaCumprod) / alphaCumprod).squareRoot()
+      guard !rf else {
+        // A flow model is conditioned on sigma × conditionScale, as `LinearDiscretization` gives
+        // it. Karras spacing only decides which sigmas are sampled (`alphasCumprod(steps:)`);
+        // mapping them back through the rho curve told the model a far higher noise level than
+        // the latent had (σ^(1/7)), so DPM++ 2M / SDE Karras gave noise on flow models.
+        return Float((1 - alphaCumprod) * Double(timesteps))
       }
+      let sigma = ((1 - alphaCumprod) / alphaCumprod).squareRoot()
       let lowerBound = sigmaMin
       let upperBound = sigmaMax
       let minInvRho = pow(lowerBound, 1.0 / rho)
@@ -283,6 +285,16 @@ extension Denoiser {
         // This is for Legacy discrete DDPM. The timestep is scaled already.
         return alphaCumprod(timestep: timestep, in: sigmas)
       }
+      if rf {
+        // The inverse of `timestep(for:)` for flow models (sigma = timestep / conditionScale),
+        // shifted as `LinearDiscretization.alphaCumprod(timestep:shift:)` does, so a start step
+        // found from Strength lands on the noise level the sampler denoises from.
+        var sigma = Double(timestep) / Double(timesteps)
+        if shift != 1 {
+          sigma = shift * sigma / (1 + (shift - 1) * sigma)
+        }
+        return 1 - sigma
+      }
       let lowerBound = sigmaMin
       let upperBound = sigmaMax
       let minInvRho = pow(lowerBound, 1.0 / rho)
@@ -291,17 +303,10 @@ extension Denoiser {
         maxInvRho + (Double(timesteps) - Double(timestep)) / Double(timesteps)
           * (minInvRho - maxInvRho),
         rho)
-      if rf {
-        if shift != 1 {
-          sigma = shift * sigma / (1 + (shift - 1) * sigma)
-        }
-        return 1 - sigma
-      } else {
-        if shift != 1 {
-          sigma = shift * sigma
-        }
-        return (1 / (sigma * sigma + 1))
+      if shift != 1 {
+        sigma = shift * sigma
       }
+      return (1 / (sigma * sigma + 1))
     }
     public func alphasCumprod(steps: Int, shift: Double) -> [Double] {
       var alphasCumprod = [Double]()

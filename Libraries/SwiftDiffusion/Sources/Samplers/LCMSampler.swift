@@ -247,6 +247,18 @@ extension LCMSampler: Sampler {
           Int(
             1000 - endStep.fractional * 1000 / Float(sampling.steps)), 1000 - 1)
       }
+      // What the model is told for each step. The table above is indexed by position on an
+      // unshifted 1000-step grid, but with Shift its sigmas are shifted, so for a flow model
+      // (conditioned on sigma × conditionScale, `LinearDiscretization.timestep(for:)`) the raw
+      // index understated the noise and LCM left confetti noise. Other models keep the raw index,
+      // which is their discrete timestep. Table lookups (`sigmas`, `alphasCumprod`,
+      // `scalingsForBoundaryConditionDiscrete`) keep the raw index.
+      let conditionTimesteps: [Float]
+      if case .u = discretization.objective {
+        conditionTimesteps = timesteps.map { discretization.timestep(for: alphasCumprod[$0]) }
+      } else {
+        conditionTimesteps = timesteps.map { Float($0) }
+      }
       let listOfLoras = lora
       var lora = listOfLoras.filter {
         $0.mode == .base || $0.mode == .all
@@ -264,7 +276,7 @@ extension LCMSampler: Sampler {
           isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
           distilledGuidanceLayers: distilledGuidanceLayers, modifier: modifier,
           textEncoding: c,
-          timesteps: timesteps[startStep.integral..<endStep.integral].map { Float($0) },
+          timesteps: Array(conditionTimesteps[startStep.integral..<endStep.integral]),
           audioShiftRatio: audioShiftRatio,
           batchSize: batchSize, startHeight: startHeight,
           startWidth: startWidth,
@@ -277,7 +289,7 @@ extension LCMSampler: Sampler {
           $0.model.encode(
             isCfgEnabled: false, textGuidanceScale: textGuidanceScale, guidanceEmbed: guidanceEmbed,
             isGuidanceEmbedEnabled: isGuidanceEmbedEnabled, textEncoding: oldC,
-            timesteps: timesteps[startStep.integral..<endStep.integral].map { Float($0) },
+            timesteps: Array(conditionTimesteps[startStep.integral..<endStep.integral]),
             vector: vector.first, batchSize: batchSize, startHeight: startHeight,
             startWidth: startWidth, tokenLengthUncond: tokenLengthUncond,
             tokenLengthCond: tokenLengthCond, zeroNegativePrompt: zeroNegativePrompt,
@@ -288,7 +300,7 @@ extension LCMSampler: Sampler {
           $0.model.encode(
             isCfgEnabled: false, textGuidanceScale: textGuidanceScale, guidanceEmbed: guidanceEmbed,
             isGuidanceEmbedEnabled: isGuidanceEmbedEnabled, textEncoding: oldC,
-            timesteps: timesteps[startStep.integral..<endStep.integral].map { Float($0) },
+            timesteps: Array(conditionTimesteps[startStep.integral..<endStep.integral]),
             vector: nil, batchSize: batchSize, startHeight: startHeight,
             startWidth: startWidth, tokenLengthUncond: tokenLengthUncond,
             tokenLengthCond: tokenLengthCond, zeroNegativePrompt: zeroNegativePrompt,
@@ -444,7 +456,7 @@ extension LCMSampler: Sampler {
           return .failure(SamplerError.cancelled(unets))
         }
         let timestep = timesteps[i]
-        if Float(timestep) < refinerKickIn, let refiner = refiner {
+        if conditionTimesteps[i] < refinerKickIn, let refiner = refiner {
           unets = [nil]
           unet.unloadModel()
           lora =
@@ -484,7 +496,7 @@ extension LCMSampler: Sampler {
                 isCfgEnabled: false, textGuidanceScale: textGuidanceScale,
                 guidanceEmbed: guidanceEmbed, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
                 distilledGuidanceLayers: refiner.distilledGuidanceLayers, modifier: modifier,
-                textEncoding: oldC, timesteps: timesteps[i..<endStep.integral].map { Float($0) },
+                textEncoding: oldC, timesteps: Array(conditionTimesteps[i..<endStep.integral]),
                 audioShiftRatio: audioShiftRatio,
                 batchSize: batchSize, startHeight: startHeight,
                 startWidth: startWidth, tokenLengthUncond: tokenLengthUncond,
@@ -560,8 +572,8 @@ extension LCMSampler: Sampler {
           cNoise = discretization.noise(for: alphasCumprod[timestep])
           cNoiseNext = discretization.noise(for: alphasCumprod[timestepNext])
         case .timestep:
-          cNoise = Float(timestep)
-          cNoiseNext = Float(timestepNext)
+          cNoise = conditionTimesteps[i]
+          cNoiseNext = i + 1 < conditionTimesteps.count ? conditionTimesteps[i + 1] : 0
         }
         let t = unet.timeEmbed(
           graph: graph, batchSize: batchSize, timestep: cNoise, version: currentModelVersion)
