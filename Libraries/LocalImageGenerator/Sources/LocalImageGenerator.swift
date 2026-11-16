@@ -194,9 +194,13 @@ extension LocalImageGenerator {
     let h3Layout =
       version == .minimaxH3 || version == .minimaxH3Image
       ? MiniMaxH3Layout.load(filePath: filePath) : .standard
-    // MiniMax H3 Image has one output head per interval of its own sigma grid, so it too runs
-    // Euler steps on that grid (unshifted) whatever sampler is picked.
-    let h3ImageGrids = version == .minimaxH3Image ? h3Layout.sigmaGrids : [:]
+    // MiniMax H3 Image has one output head per interval of its own sigma grid. DDIM Trailing (its
+    // native sampler) runs Euler steps on that grid at step counts that have one, shifted by the
+    // user's shift like any flow schedule (shift 1 keeps the grid as trained); other step counts
+    // take the trailing linear schedule. Every other sampler goes through the usual flow-model
+    // samplers below, and the head selector blends heads for whatever sigmas they step through.
+    let h3ImageGrids =
+      version == .minimaxH3Image && type == .dDIMTrailing ? h3Layout.sigmaGrids : [:]
     if (version == .minimaxH3 && h3Layout.isTwoTime) || !h3ImageGrids.isEmpty {
       return DDIMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.RFSigmaGridDiscretization>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
@@ -220,8 +224,7 @@ extension LocalImageGenerator {
         cfgZeroStar: cfgZeroStar, isBF16: isBF16,
         discretization: Denoiser.RFSigmaGridDiscretization(
           parameterization, objective: objective,
-          grids: h3ImageGrids.isEmpty ? MiniMaxH3Layout.hyperFlowSigmaGrids : h3ImageGrids,
-          shiftsGrid: h3ImageGrids.isEmpty),
+          grids: h3ImageGrids.isEmpty ? MiniMaxH3Layout.hyperFlowSigmaGrids : h3ImageGrids),
         weightsCache: weightsCache)
     }
     guard version != .wurstchenStageC && version != .wurstchenStageB else {
