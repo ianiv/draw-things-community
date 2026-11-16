@@ -358,6 +358,11 @@ public struct ModelZoo: DownloadZoo {
     public var copyright: String?
     public var huggingFaceLink: String?
     public var latentsUpscalers: [LatentsUpscaler]?
+    /// Whether the audio a model lip-syncs to is loudness-normalized before its audio encoder.
+    /// LongCat-Video Avatar 1.5 was trained on -23 LUFS audio; 1.6 shares its network but not that
+    /// preprocessing (the official `run_demo_avatar_*_audio_to_video.py` sets
+    /// `use_loudness_norm = model_type != "avatar-v1.6"`), so its files set this to false.
+    public var audioLoudnessNormalization: Bool?
     public init(
       name: String, file: String, prefix: String, version: ModelVersion,
       upcastAttention: Bool = false, defaultScale: UInt16 = 8, textEncoder: String? = nil,
@@ -377,7 +382,8 @@ public struct ModelZoo: DownloadZoo {
       framesPerSecond: Double? = nil, isBf16: Bool? = nil,
       latentsUpscalers: [LatentsUpscaler]? = nil,
       remoteApiModelConfig: RemoteApiModelConfig? = nil, note: String? = nil,
-      copyright: String? = nil, huggingFaceLink: String? = nil
+      copyright: String? = nil, huggingFaceLink: String? = nil,
+      audioLoudnessNormalization: Bool? = nil
     ) {
       self.name = name
       self.file = file
@@ -421,6 +427,7 @@ public struct ModelZoo: DownloadZoo {
       self.note = note
       self.copyright = copyright
       self.huggingFaceLink = huggingFaceLink
+      self.audioLoudnessNormalization = audioLoudnessNormalization
     }
     fileprivate var predictV: Bool? = nil
   }
@@ -3589,6 +3596,13 @@ public struct ModelZoo: DownloadZoo {
   public static func isBF16ForModel(_ name: String) -> Bool {
     guard let specification = specificationForModel(name) else { return false }
     return specification.isBf16 ?? false
+  }
+
+  /// Whether `name`'s audio is loudness-normalized before encoding: true unless its
+  /// specification says otherwise (see `Specification.audioLoudnessNormalization`).
+  public static func isAudioLoudnessNormalizedForModel(_ name: String) -> Bool {
+    guard let specification = specificationForModel(name) else { return true }
+    return specification.audioLoudnessNormalization ?? true
   }
 
   public static func defaultRefinerForModel(_ name: String) -> String? {

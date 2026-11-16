@@ -48,6 +48,7 @@ extension LocalImageGenerator {
           guard
             let encoded = try? LongCatAudioConditioningEncoder(filePath: filePath).encode(
               audio.waveform, videoFrames: audio.videoFrames, framesPerSecond: framesPerSecond,
+              loudnessNormalization: ModelZoo.isAudioLoudnessNormalizedForModel(model),
               shouldContinue: { !isCancelled.load(ordering: .acquiring) })
           else { return nil }
           features = encoded

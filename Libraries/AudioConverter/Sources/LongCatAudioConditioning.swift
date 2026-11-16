@@ -116,9 +116,11 @@ public struct LongCatAudioConditioningEncoder {
   }
 
   /// The waveform must be resampled to 16 kHz. Downmix channels before Whisper normalization.
+  /// `loudnessNormalization` brings the speech to -23 LUFS first, as 1.5's pipeline does; 1.6's
+  /// pipeline feeds the audio as it is.
   public func encode(
     _ waveform: Tensor<Float>, videoFrames: Int, framesPerSecond: Int,
-    shouldContinue: () -> Bool = { true }
+    loudnessNormalization: Bool = true, shouldContinue: () -> Bool = { true }
   ) throws -> LongCatAudioFeatures {
     guard waveform.kind == .CPU, waveform.shape.count == 2,
       waveform.shape[0] > 0, waveform.shape[1] > 0
@@ -139,14 +141,15 @@ public struct LongCatAudioConditioningEncoder {
     }
     let values = try whisperFeatures(
       samples: samples, videoFrames: videoFrames, framesPerSecond: framesPerSecond,
-      shouldContinue: shouldContinue)
+      loudnessNormalization: loudnessNormalization, shouldContinue: shouldContinue)
     return LongCatAudioFeatures(
       values: values, videoFrames: videoFrames, framesPerSecond: framesPerSecond)
   }
 
   /// Runs Whisper over the padded speech and returns per-video-frame features [frames, 5, 1280].
   private func whisperFeatures(
-    samples: [Float], videoFrames: Int, framesPerSecond: Int, shouldContinue: () -> Bool
+    samples: [Float], videoFrames: Int, framesPerSecond: Int, loudnessNormalization: Bool,
+    shouldContinue: () -> Bool
   ) throws -> [Float] {
     guard FileManager.default.fileExists(atPath: filePath) else {
       throw LongCatAudioConditioningEncoderError.missingAudioEncoder(filePath)
@@ -155,7 +158,7 @@ public struct LongCatAudioConditioningEncoder {
     precondition(framesPerSecond > 0)
     // Pad audio to the generated duration.
     let targetSamples = (videoFrames * Self.sampleRate + framesPerSecond - 1) / framesPerSecond
-    var samples = Self.loudnessNormalize(samples)
+    var samples = loudnessNormalization ? Self.loudnessNormalize(samples) : samples
     if samples.count < targetSamples {
       samples.append(contentsOf: [Float](repeating: 0, count: targetSamples - samples.count))
     }
