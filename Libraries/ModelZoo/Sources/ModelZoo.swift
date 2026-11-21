@@ -3968,6 +3968,9 @@ extension ModelZoo {
       case .DPMPP2MAYS, .DPMPPSDEAYS, .dDIMTrailing, .dPMPP2MTrailing, .dPMPPSDETrailing,
         .eulerAAYS, .eulerATrailing, .uniPCAYS, .uniPCTrailing, .tCDTrailing:
         return true
+      // Their schedule is a scheduler's (Simple when none is picked), not Karras on a flow model.
+      case .DPMPP2MSDE, .resMultistep, .heun, .ERSDE:
+        return true
       case .DDIM, .PLMS, .LCM, .TCD, .dPMPP2MKarras, .dPMPPSDEKarras, .dPMPPSDESubstep, .eulerA,
         .eulerASubstep, .uniPC:
         return false

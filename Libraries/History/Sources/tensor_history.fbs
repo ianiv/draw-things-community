@@ -19,6 +19,13 @@ enum SamplerType: byte {
   UniPCTrailing,
   UniPCAYS,
   TCDTrailing,
+  // Atelier's ComfyUI samplers. Explicit values, frozen: upstream's new samplers go above this
+  // block and take the implicit values after TCDTrailing; readers that don't know a value read
+  // it as DPMPP2MKarras.
+  DPMPP2MSDE = 100,
+  ResMultistep = 101,
+  Heun = 102,
+  ERSDE = 103,
 }
 
 enum SeedMode: byte {

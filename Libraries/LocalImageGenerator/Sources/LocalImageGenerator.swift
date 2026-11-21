@@ -133,6 +133,29 @@ extension LocalImageGenerator {
     isBF16: Bool, weightsCache: WeightsCache, scheduler: Denoiser.Scheduler = .samplerDefault,
     of: FloatType.Type
   ) -> any Sampler<FloatType, UNetWrapper<FloatType>> {
+    // The ComfyUI samplers don't run on Würstchen's cosine schedule or on MiniMax H3's joint video
+    // and audio latent (their multistep history would have to go through `sampleScaledAdd`'s
+    // per-modality sigmas, Sampler.swift); those models get the nearest Draw Things sampler.
+    if type.comfySampler != nil && !LocalImageGenerator.runsComfySamplers(version) {
+      return sampler(
+        from: type.comfyFallback, isCfgEnabled: isCfgEnabled, filePath: filePath,
+        modifier: modifier, version: version, audioShiftRatio: audioShiftRatio, qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling, activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling, usesFlashAttention: usesFlashAttention,
+        usesSolAttention: usesSolAttention, solAttentionStart: solAttentionStart,
+        solAttentionTau: solAttentionTau, objective: objective, upcastAttention: upcastAttention,
+        externalOnDemand: externalOnDemand, injectControls: injectControls,
+        injectT2IAdapters: injectT2IAdapters, injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        isGuidanceEmbedEnabled: isGuidanceEmbedEnabled, isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately,
+        stochasticSamplingGamma: stochasticSamplingGamma, conditioning: conditioning,
+        parameterization: parameterization, tiledDiffusion: tiledDiffusion, teaCache: teaCache,
+        causalInference: causalInference, cfgZeroStar: cfgZeroStar, isBF16: isBF16,
+        weightsCache: weightsCache, scheduler: scheduler, of: FloatType.self)
+    }
     let usesSolAttention = usesSolAttention && version == .minimaxH3
     let manualSubsteps: (Int) -> [Int] = {
       switch $0 {
@@ -316,7 +339,7 @@ extension LocalImageGenerator {
     }
     guard version != .wurstchenStageC && version != .wurstchenStageB else {
       switch type {
-      case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing:
+      case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing, .DPMPP2MSDE, .resMultistep:
         return DPMPP2MSampler<FloatType, UNetWrapper<FloatType>, Denoiser.CosineDiscretization>(
           filePath: filePath, modifier: modifier, version: version,
           audioShiftRatio: audioShiftRatio, qkNorm: qkNorm,
@@ -364,7 +387,7 @@ extension LocalImageGenerator {
           cfgZeroStar: cfgZeroStar, isBF16: isBF16,
           discretization: Denoiser.CosineDiscretization(parameterization, objective: objective),
           weightsCache: weightsCache)
-      case .DDIM, .dDIMTrailing:
+      case .DDIM, .dDIMTrailing, .heun:
         return DDIMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.CosineDiscretization>(
           filePath: filePath, modifier: modifier, version: version,
           audioShiftRatio: audioShiftRatio, qkNorm: qkNorm,
@@ -412,7 +435,7 @@ extension LocalImageGenerator {
           cfgZeroStar: cfgZeroStar, isBF16: isBF16,
           discretization: Denoiser.CosineDiscretization(parameterization, objective: objective),
           weightsCache: weightsCache)
-      case .dPMPPSDEKarras, .dPMPPSDESubstep, .dPMPPSDETrailing, .DPMPPSDEAYS:
+      case .dPMPPSDEKarras, .dPMPPSDESubstep, .dPMPPSDETrailing, .DPMPPSDEAYS, .ERSDE:
         return DPMPPSDESampler<FloatType, UNetWrapper<FloatType>, Denoiser.CosineDiscretization>(
           filePath: filePath, modifier: modifier, version: version,
           audioShiftRatio: audioShiftRatio, qkNorm: qkNorm,
@@ -617,7 +640,7 @@ extension LocalImageGenerator {
             parameterization, objective: objective, samplingTimesteps: samplingTimesteps),
           weightsCache: weightsCache)
       }
-    case .dPMPP2MTrailing:
+    case .dPMPP2MTrailing, .DPMPP2MSDE, .resMultistep:
       return DPMPP2MSampler<FloatType, UNetWrapper<FloatType>, Denoiser.LinearDiscretization>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -795,7 +818,7 @@ extension LocalImageGenerator {
         discretization: Denoiser.LinearDiscretization(
           parameterization, objective: objective, timestepSpacing: .leading),
         weightsCache: weightsCache)
-    case .dDIMTrailing:
+    case .dDIMTrailing, .heun:
       return DDIMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.LinearDiscretization>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -867,7 +890,7 @@ extension LocalImageGenerator {
         discretization: Denoiser.KarrasDiscretization(
           karrasParameterization, objective: objective),
         weightsCache: weightsCache)
-    case .dPMPPSDETrailing:
+    case .dPMPPSDETrailing, .ERSDE:
       return DPMPPSDESampler<FloatType, UNetWrapper<FloatType>, Denoiser.LinearDiscretization>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -1241,7 +1264,7 @@ extension LocalImageGenerator {
   ) -> any Sampler<FloatType, UNetWrapper<FloatType>> {
     typealias D = Denoiser.ScheduledDiscretization
     switch type {
-    case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing:
+    case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing, .DPMPP2MSDE, .resMultistep:
       return DPMPP2MSampler<FloatType, UNetWrapper<FloatType>, D>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -1285,7 +1308,7 @@ extension LocalImageGenerator {
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
         cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
         weightsCache: weightsCache)
-    case .DDIM, .dDIMTrailing:
+    case .DDIM, .dDIMTrailing, .heun:
       return DDIMSampler<FloatType, UNetWrapper<FloatType>, D>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -1329,7 +1352,7 @@ extension LocalImageGenerator {
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
         cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
         weightsCache: weightsCache)
-    case .dPMPPSDEKarras, .dPMPPSDETrailing, .DPMPPSDEAYS, .dPMPPSDESubstep:
+    case .dPMPPSDEKarras, .dPMPPSDETrailing, .DPMPPSDEAYS, .dPMPPSDESubstep, .ERSDE:
       return DPMPPSDESampler<FloatType, UNetWrapper<FloatType>, D>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -9437,6 +9460,45 @@ extension LocalImageGenerator {
         batch.append(result[i..<(i + 1), 0..<shape[1], 0..<shape[2], 0..<shape[3]].copied())
       }
       return (batch, audio.map { [$0] })
+    }
+  }
+}
+
+extension SamplerType {
+  /// The ComfyUI sampler this type runs (`Denoiser.ComfySampler`); nil for Draw Things' own.
+  public var comfySampler: Denoiser.ComfySampler? {
+    switch self {
+    case .DPMPP2MSDE: return .dpmpp2mSDE
+    case .resMultistep: return .resMultistep
+    case .heun: return .heun
+    case .ERSDE: return .erSDE
+    default: return nil
+    }
+  }
+
+  /// The Draw Things sampler closest to a ComfyUI one, for models that can't run those
+  /// (`LocalImageGenerator.runsComfySamplers`): a second-order multistep for the multistep ones,
+  /// deterministic Euler for Heun, and the stochastic DPM++ SDE for ER-SDE. Trailing, so flow models
+  /// can take them. `self` for Draw Things' own samplers.
+  public var comfyFallback: SamplerType {
+    switch self {
+    case .DPMPP2MSDE, .resMultistep: return .dPMPP2MTrailing
+    case .heun: return .dDIMTrailing
+    case .ERSDE: return .dPMPPSDETrailing
+    default: return self
+    }
+  }
+}
+
+extension LocalImageGenerator {
+  /// Whether a model runs the ComfyUI samplers itself. Würstchen samples on its own cosine schedule
+  /// and MiniMax H3 (video, with audio) on per-modality sigmas; they run `comfyFallback`.
+  public static func runsComfySamplers(_ version: ModelVersion) -> Bool {
+    switch version {
+    case .wurstchenStageB, .wurstchenStageC, .minimaxH3:
+      return false
+    default:
+      return true
     }
   }
 }

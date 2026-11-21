@@ -38,6 +38,14 @@ extension SamplerType {
       self = .TCD
     case .tCDTrailing:
       self = .tCDTrailing
+    case .DPMPP2MSDE:
+      self = .DPMPP2MSDE
+    case .resMultistep:
+      self = .resMultistep
+    case .heun:
+      self = .heun
+    case .ERSDE:
+      self = .ERSDE
     case .eulerATrailing:
       self = .eulerATrailing
     case .dPMPPSDETrailing:
@@ -85,6 +93,14 @@ extension DataModels.SamplerType {
       self = .TCD
     case .tCDTrailing:
       self = .tCDTrailing
+    case .DPMPP2MSDE:
+      self = .DPMPP2MSDE
+    case .resMultistep:
+      self = .resMultistep
+    case .heun:
+      self = .heun
+    case .ERSDE:
+      self = .ERSDE
     case .eulerATrailing:
       self = .eulerATrailing
     case .dPMPPSDETrailing:

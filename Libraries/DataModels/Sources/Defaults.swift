@@ -51,6 +51,14 @@ extension SamplerType: CustomStringConvertible {
       return "TCD"
     case .tCDTrailing:
       return "TCD Trailing"
+    case .DPMPP2MSDE:
+      return "DPM++ 2M SDE"
+    case .resMultistep:
+      return "Res Multistep"
+    case .heun:
+      return "Heun"
+    case .ERSDE:
+      return "ER-SDE"
     case .eulerATrailing:
       return "Euler A Trailing"
     case .dPMPPSDETrailing:
@@ -74,7 +82,20 @@ extension SamplerType: CustomStringConvertible {
 
   public init(from rawString: String) {
     let sampler = rawString.lowercased()
-    if sampler.contains("dpm") {
+    // The ComfyUI samplers by their names here and in ComfyUI (`dpmpp_2m_sde`, `res_multistep`,
+    // `heun`, `er_sde`). None of Draw Things' own names contains these, so its strings parse as
+    // before.
+    let words = sampler.replacingOccurrences(of: "_", with: " ").replacingOccurrences(
+      of: "-", with: " ")
+    if words.contains("er sde") || words == "ersde" {
+      self = SamplerType.ERSDE
+    } else if words.contains("res multistep") {
+      self = SamplerType.resMultistep
+    } else if words.contains("heun") {
+      self = SamplerType.heun
+    } else if sampler.contains("dpm") && words.contains("2m sde") {
+      self = SamplerType.DPMPP2MSDE
+    } else if sampler.contains("dpm") {
       if sampler.contains("sde") {
         if sampler.contains("substep") {
           self = SamplerType.dPMPPSDESubstep

@@ -54,7 +54,11 @@ extension ScriptExecutor {
       DDIM_TRAILING: 16,
       UNI_PC_TRAILING: 17,
       UNI_PC_AYS: 18,
-      TCD_TRAILING: 19
+      TCD_TRAILING: 19,
+      DPMPP_2M_SDE: 100,
+      RES_MULTISTEP: 101,
+      HEUN: 102,
+      ER_SDE: 103
     }
 
     const ColorCalibration = {
