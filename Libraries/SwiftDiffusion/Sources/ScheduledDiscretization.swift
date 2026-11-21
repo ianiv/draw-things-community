@@ -41,7 +41,8 @@ extension Denoiser {
   /// `MiniMaxH3ImageModelSampling` (comfy/ldm/minimax/sampling.py) when a sigma grid is given:
   /// sigma(t) runs piecewise-linearly along the grid and the shift is unused, so the schedulers at
   /// the grid's step count land on (or, where ComfyUI's integer table rounds, within 1e-3 of) the
-  /// grid the output heads were distilled for. Discrete and EDM models apply Draw Things' shift
+  /// grid the output heads were distilled for; unlike ComfyUI, no step goes below the grid's last
+  /// nonzero sigma (`floored(_:at:)`). Discrete and EDM models apply Draw Things' shift
   /// (sigma × shift, as `LinearDiscretization` does) to the result; ComfyUI has none for them.
   public struct ScheduledDiscretization: Discretization {
     private let linearDiscretization: LinearDiscretization
@@ -126,10 +127,26 @@ extension Denoiser {
       }
       guard sigmas.count == steps + 1 else { return nil }
       sigmas[steps] = 0
+      if let floor = sampling.sigmaFloor {
+        sigmas = Self.floored(sigmas, at: floor)
+      }
       if sampling.appliesShiftToSigmas && shift != 1 {
         sigmas = sigmas.map { $0 * shift }
       }
       return sigmas
+    }
+
+    /// The nonzero sigmas moved so the lowest is at least `floor`: when it falls below, they're
+    /// remapped linearly from [lowest, highest] onto [floor, highest]. Clamping would give repeated
+    /// sigmas (zero-length steps) wherever two fall below the floor; the remap keeps every step,
+    /// their order and the top of the schedule, and leaves a schedule already above the floor (Simple
+    /// at the grid's own step count, Karras and Exponential, which end on it) as it is.
+    static func floored(_ sigmas: [Double], at floor: Double) -> [Double] {
+      let nonzero = sigmas.filter { $0 > 0 }
+      guard let lowest = nonzero.min(), let highest = nonzero.max(), lowest < floor, highest > floor
+      else { return sigmas }
+      let scale = (highest - floor) / (highest - lowest)
+      return sigmas.map { $0 > 0 ? floor + ($0 - lowest) * scale : 0 }
     }
 
     /// comfy/samplers.py `simple_scheduler`: every (count / steps)-th entry of the model's sigma
@@ -338,14 +355,20 @@ extension Denoiser.ScheduledDiscretization {
       }
     }
 
-    /// Where Karras and exponential end. MiniMax H3 Image never takes input below its last
-    /// nonzero grid point (about 0.23), so they end there, as `LocalImageGenerator.sampler(from:)`
-    /// floors its Karras schedule; ComfyUI would go down to the table's first entry.
-    var sigmaSpaceMin: Double {
+    /// MiniMax H3 Image's last nonzero grid point (about 0.23): it never takes input below it, and
+    /// steps spent under it came out as noise, so every scheduler's lowest nonzero sigma stays at
+    /// or above it, as `LocalImageGenerator.sampler(from:)` floors its Karras schedule. ComfyUI
+    /// goes down to the table's first entry. Nil for other models.
+    var sigmaFloor: Double? {
       if case .grid(let grid) = kind, grid.count >= 2 {
         return grid[1]
       }
-      return sigmaMin
+      return nil
+    }
+
+    /// Where Karras and exponential end: the floor where there is one, which they then end on.
+    var sigmaSpaceMin: Double {
+      sigmaFloor ?? sigmaMin
     }
 
     var sigmaMax: Double {
