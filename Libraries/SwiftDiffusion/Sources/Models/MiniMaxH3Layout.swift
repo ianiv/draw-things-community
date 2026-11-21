@@ -44,9 +44,13 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   /// False for MiniMax H3 Image, which has no audio stream (no audio projections in or out).
   public var hasAudio: Bool
   /// Sigma grid (descending, 1 to 0) a PDD checkpoint was distilled on. It has one stacked output
-  /// head per interval: the first is a full head, the others are offsets from it. Empty when the
-  /// checkpoint has a single output head.
+  /// head per interval (see `headsAreOffsets`). Empty when the checkpoint has a single output head.
   public var sigmaGrid: [Double]
+  /// Whether the output heads after the first are offsets from it, as ComfyUI's pruned release
+  /// stores them (what Atelier's importer converts), or each a full prediction, as in Draw Things'
+  /// `minimax_h3_image_i4x.ckpt`. Not serialized: checkpoints with a layout record come from the
+  /// importer, and `image` (no record) has full heads.
+  public var headsAreOffsets: Bool = true
   /// Rows of the `adaln_t_table` of curve-form checkpoints, which replace the time embedder with a
   /// table of the time-embedding curve in a small shared basis (`timeEmbeddingSize` wide), sampled
   /// uniformly over t in [0, 1]. Zero when the checkpoint has a time embedder.
@@ -187,9 +191,13 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
 
   /// MiniMax H3 Image as Draw Things ships it (`minimax_h3_image_i4x.ckpt`): all 50 blocks, a time
   /// embedder and the release's output heads, without audio. Those files carry no layout record.
-  public static let image = MiniMaxH3Layout(
-    layers: Array(0..<50), ranks: [:], timeEmbeddingSize: 2_688, endpointGate: nil,
-    hasAudio: false, sigmaGrid: imageSigmaGrid)
+  public static let image: MiniMaxH3Layout = {
+    var layout = MiniMaxH3Layout(
+      layers: Array(0..<50), ranks: [:], timeEmbeddingSize: 2_688, endpointGate: nil,
+      hasAudio: false, sigmaGrid: imageSigmaGrid)
+    layout.headsAreOffsets = false
+    return layout
+  }()
 
   /// The layout of the checkpoint at `filePath`; an image checkpoint without a layout record is
   /// `image` rather than the stock video model.
@@ -252,8 +260,9 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   }
 
   /// Weights of the stacked output heads for the step from `sigma` to `nextSigma`, following
-  /// ComfyUI's `_pdd_head`: the first head always counts in full (the others are offsets from it)
-  /// and a step takes the dt-weighted mean of the heads of the grid intervals it spans.
+  /// ComfyUI's `_pdd_head`: a step takes the dt-weighted mean of the heads of the grid intervals it
+  /// spans, and when the heads are offsets the first head always counts in full as well. With full
+  /// heads at the grid's own step count this is upstream's single nearest head.
   public func headSelector(sigma: Double, nextSigma: Double) -> [Float] {
     let heads = outputHeads
     guard heads > 1 else { return [1] }
@@ -265,8 +274,10 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
     let deltas = (start..<stop).map { sigmaGrid[$0] - sigmaGrid[$0 + 1] }
     let total = deltas.reduce(0, +)
     var selector = [Float](repeating: 0, count: heads)
-    selector[0] = 1
-    for index in max(start, 1)..<stop {
+    if headsAreOffsets {
+      selector[0] = 1
+    }
+    for index in (headsAreOffsets ? max(start, 1) : start)..<stop {
       selector[index] = Float(deltas[index - start] / total)
     }
     return selector
