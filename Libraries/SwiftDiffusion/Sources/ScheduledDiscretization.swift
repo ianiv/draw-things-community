@@ -225,7 +225,7 @@ extension Denoiser {
 
     /// scipy.stats.beta.ppf: the inverse of the regularized incomplete beta function, by
     /// bisection (it is monotonic in x).
-    static func betaQuantile(_ probability: Double, _ a: Double, _ b: Double) -> Double {
+    public static func betaQuantile(_ probability: Double, _ a: Double, _ b: Double) -> Double {
       guard probability > 0 else { return 0 }
       guard probability < 1 else { return 1 }
       var low = 0.0
