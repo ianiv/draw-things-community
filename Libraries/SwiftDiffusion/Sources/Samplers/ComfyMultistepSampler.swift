@@ -260,8 +260,7 @@ extension ComfyMultistepSampler: Sampler {
           intervals.append((now, next))
           if evaluationsPerStep == 2 && steps.sigmas[k + 1] > 0 {
             timesteps.append(next)
-            intervals.append(
-              Self.heunHeadsFollowList ? (next, next) : (now, next))
+            intervals.append((now, next))
           }
         }
         return (timesteps, intervals)
@@ -829,14 +828,5 @@ extension ComfyMultistepSampler: Sampler {
     let alphaCumprod = discretization.alphaCumprod(timestep: timestep, shift: 1)
     let sigma = discretization.sigma(from: alphaCumprod)
     return Float(sigma)
-  }
-}
-
-extension ComfyMultistepSampler {
-  /// Heun's corrector on MiniMax H3 Image uses the step's own output heads (σ_i → σ_{i+1}). Set
-  /// ATELIER_HEUN_HEADS=adjacent to give it the heads of its own sigma instead (as plain list
-  /// adjacency of the interleaved timesteps would), for comparing the two.
-  static var heunHeadsFollowList: Bool {
-    ProcessInfo.processInfo.environment["ATELIER_HEUN_HEADS"] == "adjacent"
   }
 }
