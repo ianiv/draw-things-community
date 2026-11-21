@@ -32,6 +32,11 @@ public func xorshift(_ a: UInt32) -> UInt32 {
 
 public struct LocalImageGenerator: ImageGenerator {
   public let modelPreloader: ModelPreloader
+  /// How every sampler this generator builds spaces its steps (`Denoiser.Scheduler`). Not part of
+  /// `GenerationConfiguration` (whose FlatBuffers schema Draw Things owns); callers set it on a
+  /// copy of the generator for one `generate` call, as MediaGenerationKit does from
+  /// `MediaGenerationPipeline.Configuration.scheduler`.
+  public var scheduler: Denoiser.Scheduler = .samplerDefault
   private let tokenizerV1Factory: () -> TextualInversionAttentionCLIPTokenizer
   private let tokenizerV2Factory: () -> TextualInversionAttentionCLIPTokenizer
   private let tokenizerXLFactory: () -> TextualInversionAttentionCLIPTokenizer
@@ -125,7 +130,8 @@ extension LocalImageGenerator {
     conditioning: Denoiser.Conditioning, parameterization: Denoiser.Parameterization,
     tiledDiffusion: TiledConfiguration, teaCache: TeaCacheConfiguration,
     causalInference: (Int, pad: Int), cfgZeroStar: CfgZeroStarConfiguration,
-    isBF16: Bool, weightsCache: WeightsCache, of: FloatType.Type
+    isBF16: Bool, weightsCache: WeightsCache, scheduler: Denoiser.Scheduler = .samplerDefault,
+    of: FloatType.Type
   ) -> any Sampler<FloatType, UNetWrapper<FloatType>> {
     let usesSolAttention = usesSolAttention && version == .minimaxH3
     let manualSubsteps: (Int) -> [Int] = {
@@ -173,7 +179,8 @@ extension LocalImageGenerator {
       ]
     case .sd3, .sd3Large, .pixart, .auraflow, .flux1, .kandinsky21, .wurstchenStageB,
       .wurstchenStageC, .hunyuanVideo, .wan21_1_3b, .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage,
-      .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b, .fibo2,
+      .qwenImage2_1, .wan22_5b, .zImage, .ernieImage, .flux2, .flux2_9b, .flux2_4b, .flux3_5b,
+      .fibo2,
       .mossImage,
       .cosmos2_5_2b, .cosmos2_5_2_9b,
       .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2, .longcatVideoAvatar1_5,
@@ -194,13 +201,32 @@ extension LocalImageGenerator {
     let h3Layout =
       version == .minimaxH3 || version == .minimaxH3Image
       ? MiniMaxH3Layout.load(filePath: filePath, isImage: version == .minimaxH3Image) : .standard
+    // Which schedule the sampler steps on. Substep samplers have fixed timesteps of their own,
+    // Würstchen its cosine schedule, and HyperFlow H3 Flash its distilled grids, so those keep
+    // them; EDM models only take the sigma-space schedulers (`Scheduler.isSupported(by:)`).
+    var scheduler = scheduler
+    if type == .eulerASubstep || type == .dPMPPSDESubstep || version == .wurstchenStageB
+      || version == .wurstchenStageC || (version == .minimaxH3 && h3Layout.isTwoTime)
+      || !scheduler.isSupported(by: parameterization)
+    {
+      scheduler = .samplerDefault
+    }
+    // LCM's own schedule is a 1000-entry index table on a plain flow schedule, nowhere near
+    // MiniMax H3 Image's trained sigma grid, and it came out ghosted. ComfyUI's LCM steps on its
+    // scheduler's sigmas, which with `simple` follow the grid (`ScheduledDiscretization`).
+    if version == .minimaxH3Image && type == .LCM && scheduler == .samplerDefault {
+      scheduler = .simple
+    }
     // MiniMax H3 Image has one output head per interval of its own sigma grid. DDIM Trailing (its
-    // native sampler) runs Euler steps on that grid at step counts that have one, shifted by the
-    // user's shift like any flow schedule (shift 1 keeps the grid as trained); other step counts
-    // sample the finest grid stretched to that many steps (`RFSigmaGridDiscretization`). Every other sampler goes through the usual flow-model
-    // samplers below, and the head selector blends heads for whatever sigmas they step through.
+    // native sampler) runs Euler steps on that grid at step counts that have one (shift is
+    // ignored for MiniMax H3 Image, as ComfyUI's `MiniMaxH3ImageModelSampling` does, so the grid
+    // is always sampled as trained); other step counts sample the finest grid stretched to that
+    // many steps (`RFSigmaGridDiscretization`). Every other sampler goes through the usual
+    // flow-model samplers below, and the head selector blends heads for whatever sigmas they step
+    // through.
     let h3ImageGrids =
-      version == .minimaxH3Image && type == .dDIMTrailing ? h3Layout.sigmaGrids : [:]
+      version == .minimaxH3Image && type == .dDIMTrailing && scheduler == .samplerDefault
+      ? h3Layout.sigmaGrids : [:]
     // Karras spacing (rho 7) down to sigma 0 spends most steps far below the lowest noise MiniMax
     // H3 Image ever takes as input (the last nonzero point of its grid, about 0.23): at 8 steps
     // five of them sit under 0.04, and the image came out as a web of noise, while DPM++ 2M on the
@@ -238,6 +264,32 @@ extension LocalImageGenerator {
           parameterization, objective: objective,
           grids: h3ImageGrids.isEmpty ? MiniMaxH3Layout.hyperFlowSigmaGrids : h3ImageGrids,
           stretchesFinestGrid: !h3ImageGrids.isEmpty),
+        weightsCache: weightsCache)
+    }
+    if scheduler != .samplerDefault {
+      return scheduledSampler(
+        from: type, isCfgEnabled: isCfgEnabled, filePath: filePath, modifier: modifier,
+        version: version, audioShiftRatio: audioShiftRatio, qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers,
+        distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        isGuidanceEmbedEnabled: isGuidanceEmbedEnabled, isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        stochasticSamplingGamma: stochasticSamplingGamma, conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16,
+        discretization: Denoiser.ScheduledDiscretization(
+          parameterization, objective: objective, scheduler: scheduler,
+          sigmaGrid: version == .minimaxH3Image ? h3Layout.sigmaGrid : []),
         weightsCache: weightsCache)
     }
     guard version != .wurstchenStageC && version != .wurstchenStageB else {
@@ -1146,6 +1198,202 @@ extension LocalImageGenerator {
         weightsCache: weightsCache)
     }
   }
+
+  /// The sampler for `type`'s math on a `Denoiser.Scheduler`'s schedule. Sampler types that differ
+  /// only in their schedule (DPM++ 2M Karras / AYS / Trailing, …) share one sampler here.
+  private static func scheduledSampler<FloatType: TensorNumeric & BinaryFloatingPoint>(
+    from type: SamplerType, isCfgEnabled: Bool, filePath: String, modifier: SamplerModifier,
+    version: ModelVersion, audioShiftRatio: Float, qkNorm: Bool, dualAttentionLayers: [Int],
+    distilledGuidanceLayers: Int, activationQkScaling: [Int: Int],
+    activationProjScaling: [Int: Int], activationFfnProjUpScaling: [Int: Int],
+    activationFfnScaling: [Int: Int], usesFlashAttention: UseFlashAttention,
+    usesSolAttention: Bool, solAttentionStart: Int, solAttentionTau: Float,
+    upcastAttention: Bool, externalOnDemand: Bool, injectControls: Bool, injectT2IAdapters: Bool,
+    injectAttentionKV: Bool, injectIPAdapterLengths: [Int], lora: [LoRAConfiguration],
+    isGuidanceEmbedEnabled: Bool, isQuantizedModel: Bool, canRunLoRASeparately: Bool,
+    deviceProperties: DeviceProperties, stochasticSamplingGamma: Float,
+    conditioning: Denoiser.Conditioning, tiledDiffusion: TiledConfiguration,
+    teaCache: TeaCacheConfiguration, causalInference: (Int, pad: Int),
+    cfgZeroStar: CfgZeroStarConfiguration, isBF16: Bool,
+    discretization: Denoiser.ScheduledDiscretization, weightsCache: WeightsCache
+  ) -> any Sampler<FloatType, UNetWrapper<FloatType>> {
+    typealias D = Denoiser.ScheduledDiscretization
+    switch type {
+    case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing:
+      return DPMPP2MSampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    case .eulerA, .eulerATrailing, .eulerAAYS, .eulerASubstep:
+      return EulerASampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    case .DDIM, .dDIMTrailing:
+      return DDIMSampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    case .PLMS:
+      return PLMSSampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    case .dPMPPSDEKarras, .dPMPPSDETrailing, .DPMPPSDEAYS, .dPMPPSDESubstep:
+      return DPMPPSDESampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    case .uniPC, .uniPCAYS, .uniPCTrailing:
+      return UniPCSampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    case .LCM:
+      return LCMSampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        isGuidanceEmbedEnabled: isGuidanceEmbedEnabled, isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning, tiledDiffusion: tiledDiffusion, teaCache: teaCache,
+        causalInference: causalInference, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache, usesDiscretizationSchedule: true)
+    case .TCD, .tCDTrailing:
+      return TCDSampler<FloatType, UNetWrapper<FloatType>, D>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        isGuidanceEmbedEnabled: isGuidanceEmbedEnabled, isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        stochasticSamplingGamma: stochasticSamplingGamma,
+        conditioning: conditioning, tiledDiffusion: tiledDiffusion, teaCache: teaCache,
+        causalInference: causalInference, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    }
+  }
 }
 
 extension LocalImageGenerator {
@@ -1262,6 +1510,11 @@ extension LocalImageGenerator {
         ? min(configuration.diffusionTileHeight, configuration.startHeight)
         : configuration.startHeight
       shift = ModelZoo.shiftFor((width: tiledWidth, height: tiledHeight), version: modelVersion)
+    } else if modelVersion == .minimaxH3Image {
+      // MiniMax H3 Image samples its trained sigma grid whatever the shift, as ComfyUI's
+      // `MiniMaxH3ImageModelSampling` does ("the flow shift is unused"): a shifted schedule
+      // steps through sigmas its output heads were never distilled for.
+      shift = 1
     } else {
       shift = Double(configuration.shift)
     }
@@ -3852,7 +4105,8 @@ extension LocalImageGenerator {
       .ssd1b, .svdI2v, .wurstchenStageB, .wurstchenStageC, .hunyuanVideo, .flux1, .hiDreamI1,
       .hiDreamO1, .qwenImage, .qwenImage2_1, .cosmos2_5_2b, .cosmos2_5_2_9b, .wan22_5b,
       .zImage, .ernieImage, .flux2,
-      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .seedvr2_3b, .seedvr2_7b, .ideogram4, .krea2,
+      .flux2_9b, .flux2_4b, .flux3_5b, .fibo2, .mossImage, .seedvr2_3b, .seedvr2_7b, .ideogram4,
+      .krea2,
       .minimaxH3Image:
       return (1, image, nil)
     case .ltx2, .ltx2_3, .minimaxH3:
@@ -4397,7 +4651,8 @@ extension LocalImageGenerator {
       stochasticSamplingGamma: configuration.stochasticSamplingGamma,
       conditioning: conditioning, parameterization: denoiserParameterization,
       tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self)
+      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+      scheduler: scheduler, of: FloatType.self)
     let initTimestep = sampler.timestep(for: hiresFixStrength, sampling: sampling)
     let hiresFixEnabled =
       configuration.hiresFix && initTimestep.startStep > 0 && configuration.hiresFixStartWidth > 0
@@ -5273,7 +5528,8 @@ extension LocalImageGenerator {
         stochasticSamplingGamma: configuration.stochasticSamplingGamma,
         conditioning: conditioning, parameterization: denoiserParameterization,
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-        cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self)
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+        scheduler: scheduler, of: FloatType.self)
       let startStep: (integral: Int, fractional: Float)
       let xEnc: DynamicGraph.Tensor<FloatType>
       let secondPassTextGuidance: Float
@@ -5803,7 +6059,8 @@ extension LocalImageGenerator {
       stochasticSamplingGamma: configuration.stochasticSamplingGamma,
       conditioning: conditioning, parameterization: denoiserParameterization,
       tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self)
+      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+      scheduler: scheduler, of: FloatType.self)
     let initTimestep = sampler.timestep(for: strength, sampling: sampling)
     guard
       initTimestep.startStep > 0 || modelVersion == .svdI2v || modelVersion == .seedvr2_3b
@@ -6355,7 +6612,8 @@ extension LocalImageGenerator {
           stochasticSamplingGamma: configuration.stochasticSamplingGamma,
           conditioning: conditioning, parameterization: denoiserParameterization,
           tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-          cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self
+          cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+          scheduler: scheduler, of: FloatType.self
         )
         let noise = randomLatentNoise(
           graph: graph, batchSize: batchSize.0, startHeight: startHeight,
@@ -7422,7 +7680,8 @@ extension LocalImageGenerator {
       stochasticSamplingGamma: configuration.stochasticSamplingGamma,
       conditioning: conditioning, parameterization: denoiserParameterization,
       tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self)
+      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+      scheduler: scheduler, of: FloatType.self)
     let initTimestep = sampler.timestep(for: strength, sampling: sampling)
     let graph = DynamicGraph()
     if externalOnDemand
@@ -7844,7 +8103,8 @@ extension LocalImageGenerator {
           stochasticSamplingGamma: configuration.stochasticSamplingGamma,
           conditioning: conditioning, parameterization: denoiserParameterization,
           tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-          cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self
+          cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+          scheduler: scheduler, of: FloatType.self
         )
         let noise = randomLatentNoise(
           graph: graph, batchSize: batchSize.0, startHeight: startHeight,
@@ -8391,7 +8651,8 @@ extension LocalImageGenerator {
       stochasticSamplingGamma: configuration.stochasticSamplingGamma,
       conditioning: conditioning, parameterization: denoiserParameterization,
       tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self)
+      cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+      scheduler: scheduler, of: FloatType.self)
     let initTimestep = sampler.timestep(for: strength, sampling: sampling)
     let graph = DynamicGraph()
     if externalOnDemand
@@ -8950,7 +9211,8 @@ extension LocalImageGenerator {
           stochasticSamplingGamma: configuration.stochasticSamplingGamma,
           conditioning: conditioning, parameterization: denoiserParameterization,
           tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
-          cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache, of: FloatType.self
+          cfgZeroStar: cfgZeroStar, isBF16: isBF16, weightsCache: weightsCache,
+          scheduler: scheduler, of: FloatType.self
         )
         let noise = randomLatentNoise(
           graph: graph, batchSize: batchSize.0, startHeight: startHeight,
