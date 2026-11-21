@@ -193,7 +193,7 @@ extension LocalImageGenerator {
     // the user picks runs as that.
     let h3Layout =
       version == .minimaxH3 || version == .minimaxH3Image
-      ? MiniMaxH3Layout.load(filePath: filePath) : .standard
+      ? MiniMaxH3Layout.load(filePath: filePath, isImage: version == .minimaxH3Image) : .standard
     // MiniMax H3 Image has one output head per interval of its own sigma grid. DDIM Trailing (its
     // native sampler) runs Euler steps on that grid at step counts that have one, shifted by the
     // user's shift like any flow schedule (shift 1 keeps the grid as trained); other step counts
@@ -4291,7 +4291,7 @@ extension LocalImageGenerator {
       variant: .diffusionMapping, injectedControls: 0)
     let batchSize =
       ImageGeneratorUtils.isVideoModel(modelVersion) || modelVersion == .seedvr2_3b
-        || modelVersion == .seedvr2_7b
+        || modelVersion == .seedvr2_7b || modelVersion == .minimaxH3Image
       ? 1 : Int(configuration.batchSize)
     precondition(batchSize > 0)
     let textGuidanceScale = configuration.guidanceScale
@@ -4983,7 +4983,7 @@ extension LocalImageGenerator {
         startHeight = Int(configuration.startHeight) * 16
         startScaleFactor = 8
         audioHeight = 0
-      } else if modelVersion == .wan22_5b {
+      } else if modelVersion == .wan22_5b || modelVersion == .minimaxH3Image {
         startWidth = Int(configuration.startWidth) * 4
         startHeight = Int(configuration.startHeight) * 4
         startScaleFactor = 16
@@ -5820,7 +5820,7 @@ extension LocalImageGenerator {
     }
     let batchSize =
       ImageGeneratorUtils.isVideoModel(modelVersion) || modelVersion == .seedvr2_3b
-        || modelVersion == .seedvr2_7b
+        || modelVersion == .seedvr2_7b || modelVersion == .minimaxH3Image
       ? 1 : Int(configuration.batchSize)
     precondition(batchSize > 0)
     precondition(strength >= 0 && strength <= 1)
@@ -6738,7 +6738,9 @@ extension LocalImageGenerator {
       startWidth = image.shape[2] / 4 / scaleFactor
       startHeight = image.shape[1] / 4 / scaleFactor
       latentsZoomFactor = 4
-    } else if modelVersion == .wan22_5b || modelVersion == .minimaxH3 {
+    } else if modelVersion == .wan22_5b || modelVersion == .minimaxH3
+      || modelVersion == .minimaxH3Image
+    {
       startWidth = image.shape[2] / 16 / scaleFactor
       startHeight = image.shape[1] / 16 / scaleFactor
       latentsZoomFactor = 16
@@ -7208,7 +7210,7 @@ extension LocalImageGenerator {
     }
     let batchSize =
       ImageGeneratorUtils.isVideoModel(modelVersion) || modelVersion == .seedvr2_3b
-        || modelVersion == .seedvr2_7b
+        || modelVersion == .seedvr2_7b || modelVersion == .minimaxH3Image
       ? 1 : Int(configuration.batchSize)
     precondition(batchSize > 0)
     let textGuidanceScale = configuration.guidanceScale
@@ -8177,7 +8179,7 @@ extension LocalImageGenerator {
     }
     let batchSize =
       ImageGeneratorUtils.isVideoModel(modelVersion) || modelVersion == .seedvr2_3b
-        || modelVersion == .seedvr2_7b
+        || modelVersion == .seedvr2_7b || modelVersion == .minimaxH3Image
       ? 1 : Int(configuration.batchSize)
     precondition(batchSize > 0)
     let textGuidanceScale = configuration.guidanceScale

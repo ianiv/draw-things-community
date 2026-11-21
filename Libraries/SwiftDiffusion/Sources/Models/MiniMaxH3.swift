@@ -9,6 +9,9 @@ public enum MiniMaxH3Configuration {
   public static let spatialCompression = 16
   public static let framesPerSecond = 24
   public static let audioSampleRate = 32_000
+  /// The sigma at which each of H3 Image's output heads starts (`MiniMaxH3Layout.imageSigmaGrid`
+  /// without its final 0), for upstream code that counts the heads.
+  public static let imageHeadSigmas: [Double] = Array(MiniMaxH3Layout.imageSigmaGrid.dropLast())
 }
 
 public func MiniMaxH3AudioHeight(videoLatentFrames: Int, latentWidth: Int) -> Int {

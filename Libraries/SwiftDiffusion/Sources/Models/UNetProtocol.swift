@@ -791,7 +791,7 @@ extension UNetFromNNC {
     var unconditionalUNet: ModelBuilderOrModel? = nil
     switch version {
     case .minimaxH3, .minimaxH3Image:
-      let layout = MiniMaxH3Layout.load(filePath: filePath)
+      let layout = MiniMaxH3Layout.load(filePath: filePath, isImage: version == .minimaxH3Image)
       // MiniMax H3 Image is the same transformer without the audio stream; it denoises one frame
       // per batch item and is not tiled.
       let hasAudio = layout.hasAudio

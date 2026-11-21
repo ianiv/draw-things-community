@@ -60,12 +60,17 @@ public enum LoRAImporter {
         FloatType.self, batchSize: 1, tokenLengths: [32], timesteps: 1, channels: 3_072,
         usesFlashAttention: .scale1)
     case .minimaxH3, .minimaxH3Image:
+      // H3 Image is the H3 transformer without audio, with one output head per distilled step
+      // (`MiniMaxH3Layout.imageSigmaGrid`). LoRAs only name block weights, so the layout of the
+      // dense release is enough to map them.
+      let layout: MiniMaxH3Layout = version == .minimaxH3 ? .standard : .image
       (unetMapper, unet) = MiniMaxH3(
-        hiddenSize: 5_376, layers: 50, textLength: 2, audioLength: 4, videoFrames: 1,
-        videoHeight: 64, videoWidth: 64, usesFlashAttention: .scale1)
+        hiddenSize: 5_376, layers: 50, textLength: 2, audioLength: layout.hasAudio ? 4 : 0,
+        videoFrames: 1, videoHeight: 64, videoWidth: 64, usesFlashAttention: .scale1,
+        layout: layout)
       (unetFixedMapper, unetFixed) = MiniMaxH3Fixed(
         timesteps: 1, hiddenSize: 5_376, layers: 50, textLength: (0, 2),
-        usesFlashAttention: .scale1)
+        usesFlashAttention: .scale1, layout: layout)
     case .sdxlBase:
       UNetMapping = StableDiffusionMapping.UNetXLBase
       UNetMappingFixed = StableDiffusionMapping.UNetXLBaseFixed
@@ -407,6 +412,7 @@ public enum LoRAImporter {
         isCfgEnabled = false
         isGuidanceEmbedEnabled = false
         tEmb = nil
+        // Timestep columns: video and audio (H3 Image's fixed model keeps both).
         crossattn = [
           graph.variable(.CPU, .HWC(1, 2, 5_120), of: FloatType.self),
           graph.variable(.CPU, .HWC(1, 2, 256), of: FloatType.self),
@@ -807,7 +813,7 @@ public enum LoRAImporter {
             Tensor<FloatType>(
               from: MOSSImageRotaryPositionEmbedding(height: 32, width: 32, tokenLengths: [32])))
         ]
-      case .minimaxH3, .minimaxH3Image:
+      case .minimaxH3:
         cArr =
           [
             graph.variable(.CPU, .HWC(1, 4, 32), of: FloatType.self),
@@ -817,6 +823,21 @@ public enum LoRAImporter {
           + (0..<(50 * 18 + 4)).map { _ in
             graph.variable(.CPU, .HWC(1, 1, 5_376), of: FloatType.self)
           }
+      case .minimaxH3Image:
+        // No audio: 2 text rows plus 32 x 32 video rows, no audio modulations, and the output-head
+        // selector last (`MiniMaxH3FixedConditionCount`).
+        cArr =
+          [
+            graph.variable(.CPU, .HWC(1, 2, 5_376), of: FloatType.self),
+            graph.variable(.CPU, .NHWC(1, 1_026, 1, 128), of: FloatType.self),
+          ]
+          + (0..<(50 * 12 + 2)).map { _ in
+            graph.variable(.CPU, .HWC(1, 1, 5_376), of: FloatType.self)
+          }
+          + [
+            graph.variable(
+              .CPU, .HWC(1, MiniMaxH3Layout.imageSigmaGrid.count - 1, 1), of: FloatType.self)
+          ]
       case .sdxlBase, .ssd1b, .sdxlRefiner, .svdI2v, .wurstchenStageC, .wurstchenStageB, .pixart,
         .sd3, .sd3Large, .auraflow:
         // These values doesn't matter, it won't affect the model shape, just the input vector.
@@ -1177,9 +1198,10 @@ public enum LoRAImporter {
       isDiagonal = true
       for i in 0..<weights.count {
         let startOffset = weights.offsets?[i] ?? i * estimatedInputShape0
+        // Offsets may carry an end bound for the last element.
         let endOffset =
-          i < weights.count - 1
-          ? (weights.offsets?[i + 1] ?? (i + 1) * estimatedInputShape0) : shape[0]
+          weights.offsets.flatMap { i + 1 < $0.count ? $0[i + 1] : nil }
+          ?? (i < weights.count - 1 ? (i + 1) * estimatedInputShape0 : shape[0])
         for j in 0..<weights.count {
           // Now, only diag should have any value.
           guard i != j else { continue }
@@ -1227,8 +1249,8 @@ public enum LoRAImporter {
           guard i != j else { continue }
           let startOffset = weights.offsets?[j] ?? j * estimatedInputShape1
           let endOffset =
-            j < weights.count - 1
-            ? (weights.offsets?[j + 1] ?? (j + 1) * estimatedInputShape1) : shape[1]
+            weights.offsets.flatMap { j + 1 < $0.count ? $0[j + 1] : nil }
+            ?? (j < weights.count - 1 ? (j + 1) * estimatedInputShape1 : shape[1])
           let offDiagTensor = tensor[
             (i * inputShape0)..<((i + 1) * inputShape0),
             startOffset..<endOffset

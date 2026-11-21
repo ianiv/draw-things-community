@@ -269,7 +269,7 @@ extension UNetFixedEncoder {
         ? .externalOnDemand : .externalData(deviceProperties.isFreadPreferred ? .fread : .mmap)
       let referenceImageCount = referenceImages.count
       let referenceAudioCount = referenceAudios.count
-      let layout = MiniMaxH3Layout.load(filePath: filePath)
+      let layout = MiniMaxH3Layout.load(filePath: filePath, isImage: version == .minimaxH3Image)
       // MiniMax H3 Image is the same transformer without the audio stream, denoising one frame.
       let hasAudio = layout.hasAudio
       precondition(hasAudio == (version == .minimaxH3))

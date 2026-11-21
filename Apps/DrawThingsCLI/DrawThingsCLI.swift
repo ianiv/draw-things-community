@@ -1131,6 +1131,12 @@ private enum RecommendedSettingsResolver {
       builder.startHeight = 12
       builder.numFrames = 124
       builder.shift = 12
+    } else if modelSpecification.version == .minimaxH3Image {
+      // Distilled to 6 steps without guidance. Shift 3 best approximates the distilled schedule.
+      builder.steps = 6
+      builder.guidanceScale = 1
+      builder.sampler = .dDIMTrailing
+      builder.shift = 3
     }
     return builder.build()
   }
@@ -1728,6 +1734,8 @@ private func defaultImportScale(for version: ModelVersion, artifactFileName: Str
     return 32
   case .hunyuanVideo, .wan21_14b, .wan22_5b, .longcatVideoAvatar1_5, .minimaxH3:
     return 12
+  case .minimaxH3Image:
+    return 64
   case .wan21_1_3b:
     return 8
   case .sdxlBase, .sdxlRefiner, .ssd1b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .zImage,

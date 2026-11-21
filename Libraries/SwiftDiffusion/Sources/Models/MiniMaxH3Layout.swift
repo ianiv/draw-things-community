@@ -185,6 +185,19 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   }
   private static let cache = Cache()
 
+  /// MiniMax H3 Image as Draw Things ships it (`minimax_h3_image_i4x.ckpt`): all 50 blocks, a time
+  /// embedder and the release's output heads, without audio. Those files carry no layout record.
+  public static let image = MiniMaxH3Layout(
+    layers: Array(0..<50), ranks: [:], timeEmbeddingSize: 2_688, endpointGate: nil,
+    hasAudio: false, sigmaGrid: imageSigmaGrid)
+
+  /// The layout of the checkpoint at `filePath`; an image checkpoint without a layout record is
+  /// `image` rather than the stock video model.
+  public static func load(filePath: String, isImage: Bool) -> MiniMaxH3Layout {
+    let layout = load(filePath: filePath)
+    return isImage && layout.isStandard ? .image : layout
+  }
+
   /// The layout of the checkpoint at `filePath`, cached per path.
   public static func load(filePath: String) -> MiniMaxH3Layout {
     cache.lock.lock()

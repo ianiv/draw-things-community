@@ -536,7 +536,7 @@ extension ModelPreloader {
     // SD-style preloader cannot synthesize a representative graph yet.
     if modelVersion == .hiDreamO1 || modelVersion == .seedvr2_3b || modelVersion == .seedvr2_7b
       || modelVersion == .ideogram4 || modelVersion == .krea2
-      || modelVersion == .minimaxH3
+      || modelVersion == .minimaxH3 || modelVersion == .minimaxH3Image
     {
       return
     }

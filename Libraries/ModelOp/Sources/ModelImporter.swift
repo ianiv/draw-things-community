@@ -625,7 +625,7 @@ public final class ModelImporter {
     progress?(0.05)
     if isTextEncoderCustomized {
       switch modelVersion {
-      case .longcatVideoAvatar1_5:
+      case .longcatVideoAvatar1_5, .minimaxH3Image:
         throw Error.noTextEncoder
       case .v1:
         expectedTotalAccess += 196
@@ -923,7 +923,7 @@ public final class ModelImporter {
     case .hiDreamI1:
       conditionalLength = 4096
       batchSize = 1
-    case .hiDreamO1:
+    case .hiDreamO1, .minimaxH3Image:
       fatalError()
     case .qwenImage2_1:
       conditionalLength = 4096
@@ -1164,7 +1164,7 @@ public final class ModelImporter {
           ).map {
             graph.variable(.CPU, format: .NHWC, shape: $0, of: FloatType.self)
           }
-      case .hiDreamO1:
+      case .hiDreamO1, .minimaxH3Image:
         fatalError()
       case .qwenImage2_1:
         cArr =
@@ -1510,7 +1510,7 @@ public final class ModelImporter {
           usesFlashAttention: .scale1, outputResidual: false, inputResidual: false)
         (unetFixed, unetFixedMapper) = HiDreamFixed(
           timesteps: 1, layers: (16, 32), outputTimesteps: false)
-      case .hiDreamO1:
+      case .hiDreamO1, .minimaxH3Image:
         fatalError()
       case .qwenImage2_1:
         (unetMapper, unet) = QwenImage2_1(
@@ -1755,7 +1755,7 @@ public final class ModelImporter {
             graph.variable(.CPU, .HWC(1, 128, 4096), of: FloatType.self)  // Llama encoder hidden states.
           }
         tEmb = nil
-      case .hiDreamO1:
+      case .hiDreamO1, .minimaxH3Image:
         fatalError()
       case .qwenImage2_1:
         crossattn = [
@@ -2188,7 +2188,7 @@ public final class ModelImporter {
             UNetMappingFixed = unetFixedMapper(isDiffusersFormat ? .diffusers : .generativeModels)
             modelPrefix = "dit"
             modelPrefixFixed = "dit"
-          case .v1, .v2, .kandinsky21, .wurstchenStageB, .seedvr2_3b, .seedvr2_7b:
+          case .v1, .v2, .kandinsky21, .wurstchenStageB, .seedvr2_3b, .seedvr2_7b, .minimaxH3Image:
             fatalError()
           }
           func reverseMapping(original: ModelWeightMapping) -> [String: [String]] {
@@ -2559,7 +2559,7 @@ public final class ModelImporter {
           if $0.keys.count != 1857 {
             throw Error.tensorWritesFailed
           }
-        case .hiDreamO1:
+        case .hiDreamO1, .minimaxH3Image:
           fatalError()
         case .qwenImage2_1:
           if $0.keys.count != 300 {
@@ -2925,7 +2925,7 @@ extension ModelImporter {
       clipEncoder = "\(fileName)_f16.ckpt"
     case .wurstchenStageC:
       textEncoder = nil
-    case .kandinsky21, .wurstchenStageB:
+    case .kandinsky21, .wurstchenStageB, .minimaxH3Image:
       fatalError()
     }
 
@@ -3331,7 +3331,7 @@ extension ModelImporter {
       }
       // For FLUX.2, the hires fix trigger scale is 2 of the finetune scale.
       specification.hiresFixScale = finetuneScale * 2
-    case .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b:
+    case .ltx2, .ltx2_3, .seedvr2_3b, .seedvr2_7b, .minimaxH3Image:
       fatalError()
     case .kandinsky21, .wurstchenStageB:
       fatalError()
