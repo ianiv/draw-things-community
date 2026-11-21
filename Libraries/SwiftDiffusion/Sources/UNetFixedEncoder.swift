@@ -226,7 +226,8 @@ extension UNetFixedEncoder {
     injectedControls: [(
       model: ControlModel<FloatType>, hints: [([DynamicGraph.Tensor<FloatType>], Float)]
     )], referenceImages: [DynamicGraph.Tensor<FloatType>],
-    referenceAudios: [DynamicGraph.Tensor<FloatType>]
+    referenceAudios: [DynamicGraph.Tensor<FloatType>],
+    headIntervals: [(Float, Float)]? = nil
   ) -> ([DynamicGraph.AnyTensor], ModelWeightMapper?) {
     func valueOr(
       _ usesFlashAttention: UseFlashAttention, _ value: FlashAttentionLevel
@@ -554,9 +555,14 @@ extension UNetFixedEncoder {
         let heads = layout.outputHeads
         var selector = Tensor<FloatType>(.CPU, .HWC(timesteps.count, heads, 1))
         for index in timesteps.indices {
+          // Each evaluation's heads cover the interval it steps over: the next timestep's, unless
+          // the sampler says otherwise (Heun's corrector is evaluated at the step's end but
+          // belongs to the step, `headIntervals`).
+          let interval =
+            headIntervals.map { $0[index] }
+            ?? (timesteps[index], index + 1 < timesteps.count ? timesteps[index + 1] : 0)
           let weights = layout.headSelector(
-            sigma: Double(timesteps[index] / 1_000),
-            nextSigma: index + 1 < timesteps.count ? Double(timesteps[index + 1] / 1_000) : 0)
+            sigma: Double(interval.0 / 1_000), nextSigma: Double(interval.1 / 1_000))
           for (head, weight) in weights.enumerated() {
             selector[index, head, 0] = FloatType(weight)
           }

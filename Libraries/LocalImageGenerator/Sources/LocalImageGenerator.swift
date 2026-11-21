@@ -234,6 +234,9 @@ extension LocalImageGenerator {
     {
       scheduler = .samplerDefault
     }
+    // The ComfyUI samplers have no schedule of their own: they always step on a scheduler's
+    // sigmas, Simple on flow models and Karras on the rest when none is picked.
+    scheduler = scheduler.resolved(for: parameterization, sampler: type.comfySampler)
     // MiniMax H3 Image has one output head per interval of its own sigma grid. DDIM Trailing (its
     // native sampler) runs Euler steps on that grid at step counts that have one (shift is
     // ignored for MiniMax H3 Image, as ComfyUI's `MiniMaxH3ImageModelSampling` does, so the grid
@@ -532,6 +535,8 @@ extension LocalImageGenerator {
           weightsCache: weightsCache)
       }
     }
+    // The ComfyUI samplers always have a scheduler by now and never reach this switch or
+    // Würstchen's above; they're listed with their `comfyFallback`s.
     switch type {
     case .dPMPP2MKarras:
       return DPMPP2MSampler<FloatType, UNetWrapper<FloatType>, Denoiser.KarrasDiscretization>(
@@ -1264,7 +1269,30 @@ extension LocalImageGenerator {
   ) -> any Sampler<FloatType, UNetWrapper<FloatType>> {
     typealias D = Denoiser.ScheduledDiscretization
     switch type {
-    case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing, .DPMPP2MSDE, .resMultistep:
+    case .DPMPP2MSDE, .resMultistep, .heun, .ERSDE:
+      return ComfyMultistepSampler<FloatType, UNetWrapper<FloatType>>(
+        kind: type.comfySampler!,
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        classifierFreeGuidance: isCfgEnabled, isGuidanceEmbedEnabled: isGuidanceEmbedEnabled,
+        isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning,
+        tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
+        cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
+        weightsCache: weightsCache)
+    case .dPMPP2MKarras, .DPMPP2MAYS, .dPMPP2MTrailing:
       return DPMPP2MSampler<FloatType, UNetWrapper<FloatType>, D>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -1308,7 +1336,7 @@ extension LocalImageGenerator {
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
         cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
         weightsCache: weightsCache)
-    case .DDIM, .dDIMTrailing, .heun:
+    case .DDIM, .dDIMTrailing:
       return DDIMSampler<FloatType, UNetWrapper<FloatType>, D>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,
@@ -1352,7 +1380,7 @@ extension LocalImageGenerator {
         tiledDiffusion: tiledDiffusion, teaCache: teaCache, causalInference: causalInference,
         cfgZeroStar: cfgZeroStar, isBF16: isBF16, discretization: discretization,
         weightsCache: weightsCache)
-    case .dPMPPSDEKarras, .dPMPPSDETrailing, .DPMPPSDEAYS, .dPMPPSDESubstep, .ERSDE:
+    case .dPMPPSDEKarras, .dPMPPSDETrailing, .DPMPPSDEAYS, .dPMPPSDESubstep:
       return DPMPPSDESampler<FloatType, UNetWrapper<FloatType>, D>(
         filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
         qkNorm: qkNorm,

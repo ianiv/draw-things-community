@@ -136,6 +136,17 @@ extension Denoiser {
       return sigmas
     }
 
+    /// comfy/model_sampling.py `percent_to_sigma` for flow models (`ModelSamplingDiscreteFlow`, and
+    /// `MiniMaxH3ImageModelSampling` on its grid): the sigma at timestep 1 - percent, as
+    /// `offset_first_sigma_for_snr` uses in place of sigma 1. Nil for DDPM and EDM models.
+    public func percentToSigma(_ percent: Double, shift: Double) -> Double? {
+      guard case .rf(_) = parameterization else { return nil }
+      guard percent > 0 else { return 1 }
+      guard percent < 1 else { return 0 }
+      return ModelSampling(parameterization, shift: shift, ascendingGrid: ascendingGrid).sigma(
+        timestep: 1 - percent)
+    }
+
     /// The nonzero sigmas moved so the lowest is at least `floor`: when it falls below, they're
     /// remapped linearly from [lowest, highest] onto [floor, highest]. Clamping would give repeated
     /// sigmas (zero-length steps) wherever two fall below the floor; the remap keeps every step,
