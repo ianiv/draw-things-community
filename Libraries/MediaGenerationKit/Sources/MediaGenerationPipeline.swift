@@ -197,6 +197,10 @@ public struct MediaGenerationPipeline: Sendable {
     public var compressionArtifactsQuality: Float?
     public var colorCalibration: ColorCalibration
     public var expandPromptToJson: Bool
+    /// How the sampler spaces its steps (ComfyUI's scheduler names; `.samplerDefault` keeps the
+    /// sampler's own schedule). Local generation only: it is not part of `GenerationConfiguration`
+    /// or `JSGenerationConfiguration`, so remote and cloud backends never see it.
+    public var scheduler: Denoiser.Scheduler = .samplerDefault
 
     fileprivate init(configuration: GenerationConfiguration, model: String) {
       let options = JSGenerationConfiguration(configuration: configuration)
@@ -757,6 +761,7 @@ public struct MediaGenerationPipeline: Sendable {
                   prompt: prompt,
                   negativePrompt: negativePrompt,
                   configuration: runtimeConfiguration,
+                  scheduler: configuration.scheduler,
                   image: executionInputs.image,
                   mask: executionInputs.mask,
                   hints: executionInputs.hints,

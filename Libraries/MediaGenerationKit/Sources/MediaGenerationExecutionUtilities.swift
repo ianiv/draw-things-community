@@ -194,6 +194,7 @@ internal enum MediaGenerationExecutionUtilities {
     prompt: String,
     negativePrompt: String = "",
     configuration: GenerationConfiguration,
+    scheduler: Denoiser.Scheduler = .samplerDefault,
     image: Data? = nil,
     mask: Data? = nil,
     hints: [MediaGenerationExecutionHint] = [],
@@ -202,6 +203,12 @@ internal enum MediaGenerationExecutionUtilities {
     completion: @escaping (Result<[Tensor<FloatType>], MediaGenerationKitError>) -> Void
   ) {
     queue.async {
+      // The scheduler rides on a copy of the local generator for this call only.
+      var generator = generator
+      if scheduler != .samplerDefault, var localGenerator = generator as? LocalImageGenerator {
+        localGenerator.scheduler = scheduler
+        generator = localGenerator
+      }
       let targetWidth = Int(configuration.startWidth) * 64
       let targetHeight = Int(configuration.startHeight) * 64
 
@@ -342,6 +349,7 @@ extension MediaGenerationEnvironment.Storage {
     prompt: String,
     negativePrompt: String = "",
     configuration: GenerationConfiguration,
+    scheduler: Denoiser.Scheduler = .samplerDefault,
     image: Data? = nil,
     mask: Data? = nil,
     hints: [MediaGenerationExecutionHint] = [],
@@ -360,6 +368,7 @@ extension MediaGenerationEnvironment.Storage {
       prompt: prompt,
       negativePrompt: negativePrompt,
       configuration: configuration,
+      scheduler: scheduler,
       image: image,
       mask: mask,
       hints: hints,
