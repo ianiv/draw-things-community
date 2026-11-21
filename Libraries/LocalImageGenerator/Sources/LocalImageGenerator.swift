@@ -211,21 +211,20 @@ extension LocalImageGenerator {
     {
       scheduler = .samplerDefault
     }
-    // LCM's own schedule is a 1000-entry index table on a plain flow schedule, nowhere near
-    // MiniMax H3 Image's trained sigma grid, and it came out ghosted. ComfyUI's LCM steps on its
-    // scheduler's sigmas, which with `simple` follow the grid (`ScheduledDiscretization`).
-    if version == .minimaxH3Image && type == .LCM && scheduler == .samplerDefault {
-      scheduler = .simple
-    }
     // MiniMax H3 Image has one output head per interval of its own sigma grid. DDIM Trailing (its
     // native sampler) runs Euler steps on that grid at step counts that have one (shift is
     // ignored for MiniMax H3 Image, as ComfyUI's `MiniMaxH3ImageModelSampling` does, so the grid
     // is always sampled as trained); other step counts sample the finest grid stretched to that
     // many steps (`RFSigmaGridDiscretization`). Every other sampler goes through the usual
     // flow-model samplers below, and the head selector blends heads for whatever sigmas they step
-    // through.
+    // through. LCM's own schedule is a 1000-entry index table on a plain flow schedule, nowhere
+    // near that grid, and it came out ghosted; ComfyUI's LCM steps on its scheduler's sigmas,
+    // which with `simple` follow the grid. So LCM steps on the grid DDIM Trailing samples (the
+    // same piecewise-linear curve as ComfyUI's `simple`, without its 1000-entry table's rounding,
+    // up to 1e-3 at 6 steps), with a scheduler of the user's own only when one is picked.
     let h3ImageGrids =
-      version == .minimaxH3Image && type == .dDIMTrailing && scheduler == .samplerDefault
+      version == .minimaxH3Image && (type == .dDIMTrailing || type == .LCM)
+        && scheduler == .samplerDefault
       ? h3Layout.sigmaGrids : [:]
     // Karras spacing (rho 7) down to sigma 0 spends most steps far below the lowest noise MiniMax
     // H3 Image ever takes as input (the last nonzero point of its grid, about 0.23): at 8 steps
@@ -238,6 +237,29 @@ extension LocalImageGenerator {
     {
       rf.sigmaMin = floor
       karrasParameterization = .rf(rf)
+    }
+    if version == .minimaxH3Image && type == .LCM && !h3ImageGrids.isEmpty {
+      return LCMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.RFSigmaGridDiscretization>(
+        filePath: filePath, modifier: modifier, version: version, audioShiftRatio: audioShiftRatio,
+        qkNorm: qkNorm,
+        dualAttentionLayers: dualAttentionLayers, distilledGuidanceLayers: distilledGuidanceLayers,
+        activationQkScaling: activationQkScaling,
+        activationProjScaling: activationProjScaling,
+        activationFfnProjUpScaling: activationFfnProjUpScaling,
+        activationFfnScaling: activationFfnScaling,
+        usesFlashAttention: usesFlashAttention, usesSolAttention: usesSolAttention,
+        solAttentionStart: solAttentionStart, solAttentionTau: solAttentionTau,
+        upcastAttention: upcastAttention, externalOnDemand: externalOnDemand,
+        injectControls: injectControls, injectT2IAdapters: injectT2IAdapters,
+        injectAttentionKV: injectAttentionKV,
+        injectIPAdapterLengths: injectIPAdapterLengths, lora: lora,
+        isGuidanceEmbedEnabled: isGuidanceEmbedEnabled, isQuantizedModel: isQuantizedModel,
+        canRunLoRASeparately: canRunLoRASeparately, deviceProperties: deviceProperties,
+        conditioning: conditioning, tiledDiffusion: tiledDiffusion, teaCache: teaCache,
+        causalInference: causalInference, isBF16: isBF16,
+        discretization: Denoiser.RFSigmaGridDiscretization(
+          parameterization, objective: objective, grids: h3ImageGrids, stretchesFinestGrid: true),
+        weightsCache: weightsCache, usesDiscretizationSchedule: true)
     }
     if (version == .minimaxH3 && h3Layout.isTwoTime) || !h3ImageGrids.isEmpty {
       return DDIMSampler<FloatType, UNetWrapper<FloatType>, Denoiser.RFSigmaGridDiscretization>(
