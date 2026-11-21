@@ -40,6 +40,11 @@ where UNet.FloatType == FloatType {
   public let causalInference: (Int, pad: Int)
   public let isBF16: Bool
   private let discretization: Discretization
+  /// Steps on `discretization.alphasCumprod(steps:shift:)`, as ComfyUI's `sample_lcm` steps on
+  /// whatever sigmas its scheduler gives, instead of LCM's own 1000-entry index table. Set for a
+  /// scheduler other than the sampler's own, and for MiniMax H3 Image, whose heads only know its
+  /// trained sigma grid.
+  public let usesDiscretizationSchedule: Bool
   private let weightsCache: WeightsCache
   public init(
     filePath: String, modifier: SamplerModifier, version: ModelVersion,
@@ -57,7 +62,8 @@ where UNet.FloatType == FloatType {
     deviceProperties: DeviceProperties,
     conditioning: Denoiser.Conditioning, tiledDiffusion: TiledConfiguration,
     teaCache: TeaCacheConfiguration, causalInference: (Int, pad: Int),
-    isBF16: Bool, discretization: Discretization, weightsCache: WeightsCache
+    isBF16: Bool, discretization: Discretization, weightsCache: WeightsCache,
+    usesDiscretizationSchedule: Bool = false
   ) {
     self.filePath = filePath
     self.modifier = modifier
@@ -92,15 +98,16 @@ where UNet.FloatType == FloatType {
     self.causalInference = causalInference
     self.isBF16 = isBF16
     self.discretization = discretization
+    self.usesDiscretizationSchedule = usesDiscretizationSchedule
 
     self.weightsCache = weightsCache
   }
 }
 
 extension LCMSampler: Sampler {
-  private func scalingsForBoundaryConditionDiscrete(timestep: Int) -> (Float, Float) {
+  private func scalingsForBoundaryConditionDiscrete(timestep: Double) -> (Float, Float) {
     // let sigmaData = 0.5
-    let scaledTimestep = Double(timestep) * 10
+    let scaledTimestep = timestep * 10
     let cSkip = 0.25 / (scaledTimestep * scaledTimestep + 0.25)
     let cOut = scaledTimestep / (scaledTimestep * scaledTimestep + 0.25).squareRoot()
     return (Float(cSkip), Float(cOut))
@@ -227,38 +234,95 @@ extension LCMSampler: Sampler {
         canRunLoRASeparately: canRunLoRASeparately, externalOnDemand: externalOnDemand,
         deviceProperties: deviceProperties, weightsCache: weightsCache)
       let injectedControlsC: [[DynamicGraph.Tensor<FloatType>]]
-      let alphasCumprod = Array(
-        discretization.alphasCumprod(steps: 1000, shift: sampling.shift).reversed())
-      let sigmas = alphasCumprod.map { discretization.sigma(from: $0) }
-      var timesteps = (0..<sampling.steps).map {
-        min(
-          Int(
-            (Double(1000 - 1 - 20) * Double(sampling.steps - $0)
-              / Double(sampling.steps)).rounded()) + 20, 1000 - 1)
-      }
-      if (Float(startStep.integral) - startStep.fractional).magnitude >= 1e-4 {
-        timesteps[startStep.integral] = min(
-          Int(
-            1000 - startStep.fractional * 1000 / Float(sampling.steps)), 1000 - 1)
-      }
-      if (Float(endStep.integral) - endStep.fractional).magnitude >= 1e-4
-        && endStep.integral < sampling.steps
-      {
-        timesteps[endStep.integral] = min(
-          Int(
-            1000 - endStep.fractional * 1000 / Float(sampling.steps)), 1000 - 1)
-      }
-      // What the model is told for each step. The table above is indexed by position on an
-      // unshifted 1000-step grid, but with Shift its sigmas are shifted, so for a flow model
-      // (conditioned on sigma × conditionScale, `LinearDiscretization.timestep(for:)`) the raw
-      // index understated the noise and LCM left confetti noise. Other models keep the raw index,
-      // which is their discrete timestep. Table lookups (`sigmas`, `alphasCumprod`,
-      // `scalingsForBoundaryConditionDiscrete`) keep the raw index.
+      // Per step: the alphaCumprod (and sigma) it denoises from, the one it renoises to, what the
+      // model is told, and LCM's boundary-condition scalings (c_skip, c_out).
+      let stepAlphas: [Double]
+      let nextAlphas: [Double]
+      let stepSigmas: [Double]
       let conditionTimesteps: [Float]
-      if case .u = discretization.objective {
-        conditionTimesteps = timesteps.map { discretization.timestep(for: alphasCumprod[$0]) }
+      let blurTimesteps: [Float]
+      let boundaryScalings: [(Float, Float)]
+      let refinerFirstTimestep: Float
+      if usesDiscretizationSchedule {
+        // k_diffusion/sampling.py `sample_lcm`: step i takes the model's denoised estimate at
+        // sigmas[i] and renoises it to sigmas[i + 1] of the scheduled sigmas. A fractional start
+        // interpolates the timestep as the other samplers do (`DDIMSampler`).
+        let alphasCumprod = discretization.alphasCumprod(
+          steps: sampling.steps, shift: sampling.shift)
+        var alphas = (0..<sampling.steps).map { alphasCumprod[min($0, alphasCumprod.count - 1)] }
+        if (Float(startStep.integral) - startStep.fractional).magnitude >= 1e-4,
+          startStep.integral < sampling.steps
+        {
+          let lowTimestep = discretization.timestep(
+            for: alphasCumprod[max(0, min(startStep.integral, alphasCumprod.count - 1))])
+          let highTimestep = discretization.timestep(
+            for: alphasCumprod[
+              max(0, min(Int(startStep.fractional.rounded(.up)), alphasCumprod.count - 1))])
+          let timestep =
+            lowTimestep + (highTimestep - lowTimestep)
+            * (startStep.fractional - Float(startStep.integral))
+          alphas[startStep.integral] = discretization.alphaCumprod(timestep: timestep, shift: 1)
+        }
+        stepAlphas = alphas
+        nextAlphas = (0..<sampling.steps).map {
+          alphasCumprod[min($0 + 1, alphasCumprod.count - 1)]
+        }
+        stepSigmas = stepAlphas.map { discretization.sigma(from: $0) }
+        conditionTimesteps = stepAlphas.map { discretization.timestep(for: $0) }
+        blurTimesteps = conditionTimesteps
+        if case .u = discretization.objective {
+          // ComfyUI scales by the boundary condition only for LCM's discrete model sampling
+          // (comfy/model_sampling.py `LCM`); a flow model's denoised estimate is used as is.
+          boundaryScalings = stepAlphas.map { _ in (0, 1) }
+        } else {
+          boundaryScalings = conditionTimesteps.map {
+            scalingsForBoundaryConditionDiscrete(timestep: Double($0))
+          }
+        }
+        refinerFirstTimestep = conditionTimesteps.first ?? 0
       } else {
-        conditionTimesteps = timesteps.map { Float($0) }
+        let alphasCumprod = Array(
+          discretization.alphasCumprod(steps: 1000, shift: sampling.shift).reversed())
+        let sigmas = alphasCumprod.map { discretization.sigma(from: $0) }
+        var timesteps = (0..<sampling.steps).map {
+          min(
+            Int(
+              (Double(1000 - 1 - 20) * Double(sampling.steps - $0)
+                / Double(sampling.steps)).rounded()) + 20, 1000 - 1)
+        }
+        if (Float(startStep.integral) - startStep.fractional).magnitude >= 1e-4 {
+          timesteps[startStep.integral] = min(
+            Int(
+              1000 - startStep.fractional * 1000 / Float(sampling.steps)), 1000 - 1)
+        }
+        if (Float(endStep.integral) - endStep.fractional).magnitude >= 1e-4
+          && endStep.integral < sampling.steps
+        {
+          timesteps[endStep.integral] = min(
+            Int(
+              1000 - endStep.fractional * 1000 / Float(sampling.steps)), 1000 - 1)
+        }
+        stepAlphas = timesteps.map { alphasCumprod[$0] }
+        nextAlphas = timesteps.indices.map {
+          alphasCumprod[$0 + 1 < timesteps.count ? timesteps[$0 + 1] : 0]
+        }
+        stepSigmas = timesteps.map { sigmas[$0] }
+        // What the model is told for each step. The table above is indexed by position on an
+        // unshifted 1000-step grid, but with Shift its sigmas are shifted, so for a flow model
+        // (conditioned on sigma × conditionScale, `LinearDiscretization.timestep(for:)`) the raw
+        // index understated the noise and LCM left confetti noise. Other models keep the raw
+        // index, which is their discrete timestep. Table lookups (`sigmas`, `alphasCumprod`,
+        // `scalingsForBoundaryConditionDiscrete`) keep the raw index.
+        if case .u = discretization.objective {
+          conditionTimesteps = timesteps.map { discretization.timestep(for: alphasCumprod[$0]) }
+        } else {
+          conditionTimesteps = timesteps.map { Float($0) }
+        }
+        blurTimesteps = timesteps.map { Float($0) }
+        boundaryScalings = timesteps.map {
+          scalingsForBoundaryConditionDiscrete(timestep: Double($0))
+        }
+        refinerFirstTimestep = Float(timesteps[0])
       }
       let listOfLoras = lora
       var lora = listOfLoras.filter {
@@ -456,7 +520,6 @@ extension LCMSampler: Sampler {
         guard feedback(i - startStep.integral, rawValue) else {
           return .failure(SamplerError.cancelled(unets))
         }
-        let timestep = timesteps[i]
         if conditionTimesteps[i] < refinerKickIn, let refiner = refiner {
           unets = [nil]
           unet.unloadModel()
@@ -514,9 +577,8 @@ extension LCMSampler: Sampler {
           currentModelVersion = refiner.version
           timeEmbeddingSize =
             refiner.version == .kandinsky21 || refiner.version == .sdxlRefiner ? 384 : 320
-          let firstTimestep = timesteps[0]
           let t = unet.timeEmbed(
-            graph: graph, batchSize: batchSize, timestep: Float(firstTimestep),
+            graph: graph, batchSize: batchSize, timestep: refinerFirstTimestep,
             version: currentModelVersion)
           if let t = t, timeEmbeddingSize != cfgCond.shape[1] || !refiner.isConsistencyModel {
             cfgCond = graph.variable(like: t)
@@ -564,14 +626,13 @@ extension LCMSampler: Sampler {
           refinerKickIn = -1
           unets.append(unet)
         }
-        let sigma = sigmas[timestep]
-        let timestepNext = i + 1 < timesteps.count ? timesteps[i + 1] : 0
+        let sigma = stepSigmas[i]
         let cNoise: Float
         let cNoiseNext: Float
         switch conditioning {
         case .noise:
-          cNoise = discretization.noise(for: alphasCumprod[timestep])
-          cNoiseNext = discretization.noise(for: alphasCumprod[timestepNext])
+          cNoise = discretization.noise(for: stepAlphas[i])
+          cNoiseNext = discretization.noise(for: nextAlphas[i])
         case .timestep:
           cNoise = conditionTimesteps[i]
           cNoiseNext = i + 1 < conditionTimesteps.count ? conditionTimesteps[i + 1] : 0
@@ -624,13 +685,13 @@ extension LCMSampler: Sampler {
         }
         if let blur = blur {
           let alpha =
-            0.001 * sharpness * (discretization.timesteps - Float(timestep))
+            0.001 * sharpness * (discretization.timesteps - blurTimesteps[i])
             / discretization.timesteps
           let etOutDegraded = blur(inputs: etOut)[0].as(of: FloatType.self)
           etOut = Functional.add(
             left: etOutDegraded, right: etOut, leftScalar: alpha, rightScalar: 1 - alpha)
         }
-        let alpha = alphasCumprod[timestep]
+        let alpha = stepAlphas[i]
         let predictOriginalSample: DynamicGraph.Tensor<FloatType>
         switch discretization.objective {
         case .u(_):
@@ -653,11 +714,11 @@ extension LCMSampler: Sampler {
             leftScalar: Float(sigmaData2 / (sigma * sigma + sigmaData2).squareRoot()),
             rightScalar: Float(sigma * sigmaData / (sigma * sigma + sigmaData2).squareRoot()))
         }
-        let (cSkip, cOut) = scalingsForBoundaryConditionDiscrete(timestep: timestep)
+        let (cSkip, cOut) = boundaryScalings[i]
         let denoised = Functional.add(
           left: predictOriginalSample, right: x, leftScalar: cOut, rightScalar: cSkip)
         oldDenoised = denoised
-        let alphaPrev = alphasCumprod[timestepNext]
+        let alphaPrev = nextAlphas[i]
         if i < sampling.steps - 1 {
           let noise = graph.variable(like: x)
           noise.randn(std: 1, mean: 0)
