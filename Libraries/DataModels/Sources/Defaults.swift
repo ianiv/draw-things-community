@@ -84,17 +84,18 @@ extension SamplerType: CustomStringConvertible {
     let sampler = rawString.lowercased()
     // The ComfyUI samplers by their names here and in ComfyUI (`dpmpp_2m_sde`, `res_multistep`,
     // `heun`, `er_sde`). None of Draw Things' own names contains these, so its strings parse as
-    // before.
+    // before. DPM++ names come first: "DPM++ 2M SDE Heun Karras" (A1111 / Forge) and ComfyUI's
+    // `dpmpp_2m_sde_heun` are DPM++ 2M SDE with a Heun correction, not Heun.
     let words = sampler.replacingOccurrences(of: "_", with: " ").replacingOccurrences(
       of: "-", with: " ")
-    if words.contains("er sde") || words == "ersde" {
+    if sampler.contains("dpm") && words.contains("2m sde") {
+      self = SamplerType.DPMPP2MSDE
+    } else if words.contains("er sde") || words == "ersde" {
       self = SamplerType.ERSDE
     } else if words.contains("res multistep") {
       self = SamplerType.resMultistep
-    } else if words.contains("heun") {
+    } else if words.contains("heun") && !sampler.contains("dpm") {
       self = SamplerType.heun
-    } else if sampler.contains("dpm") && words.contains("2m sde") {
-      self = SamplerType.DPMPP2MSDE
     } else if sampler.contains("dpm") {
       if sampler.contains("sde") {
         if sampler.contains("substep") {
