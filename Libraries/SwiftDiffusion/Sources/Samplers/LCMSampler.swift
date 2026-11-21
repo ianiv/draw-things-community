@@ -797,10 +797,25 @@ extension LCMSampler: Sampler {
     )
   }
 
-  public func sampleScaleFactor(at step: Float, sampling: Sampling) -> Float {
-    let step = Int(step.rounded())
+  /// The alphaCumprod the input is noised to for a start at `step`. On the discretization's
+  /// schedule a fractional step interpolates the timestep as `sample` does for its first step
+  /// (and `DDIMSampler.sampleScaleFactor`), so the latent carries the noise the model is told;
+  /// LCM's own table keeps the nearest whole step.
+  private func startAlphaCumprod(at step: Float, sampling: Sampling) -> Double {
     let alphasCumprod = discretization.alphasCumprod(steps: sampling.steps, shift: sampling.shift)
-    let alphaCumprod = alphasCumprod[max(0, min(alphasCumprod.count - 1, step))]
+    guard usesDiscretizationSchedule else {
+      return alphasCumprod[max(0, min(alphasCumprod.count - 1, Int(step.rounded())))]
+    }
+    let lowTimestep = discretization.timestep(
+      for: alphasCumprod[max(0, min(Int(step.rounded(.down)), alphasCumprod.count - 1))])
+    let highTimestep = discretization.timestep(
+      for: alphasCumprod[max(0, min(Int(step.rounded(.up)), alphasCumprod.count - 1))])
+    let timestep = lowTimestep + (highTimestep - lowTimestep) * (step - Float(step.rounded(.down)))
+    return discretization.alphaCumprod(timestep: timestep, shift: 1)
+  }
+
+  public func sampleScaleFactor(at step: Float, sampling: Sampling) -> Float {
+    let alphaCumprod = startAlphaCumprod(at: step, sampling: sampling)
     if case .u(_) = discretization.objective {
       return Float(alphaCumprod)
     } else {
@@ -809,9 +824,7 @@ extension LCMSampler: Sampler {
   }
 
   public func noiseScaleFactor(at step: Float, sampling: Sampling) -> Float {
-    let step = Int(step.rounded())
-    let alphasCumprod = discretization.alphasCumprod(steps: sampling.steps, shift: sampling.shift)
-    let alphaCumprod = alphasCumprod[max(0, min(alphasCumprod.count - 1, step))]
+    let alphaCumprod = startAlphaCumprod(at: step, sampling: sampling)
     if case .u(_) = discretization.objective {
       return Float(1 - alphaCumprod)
     } else {
