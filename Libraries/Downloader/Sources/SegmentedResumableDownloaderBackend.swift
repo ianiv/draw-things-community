@@ -7,6 +7,7 @@ final class SegmentedResumableDownloaderBackend: NSObject, DownloadBackend {
   private let localUrl: URL
   private let sha256: String?
   private let probe: URLDownloadProbe
+  private let headers: [String: String]
   private let handler: ResumableDownloader.ProgressHandler
   private let partUrl: URL
   private let manifestUrl: URL
@@ -41,12 +42,14 @@ final class SegmentedResumableDownloaderBackend: NSObject, DownloadBackend {
     localUrl: URL,
     sha256: String?,
     probe: URLDownloadProbe,
+    headers: [String: String] = [:],
     handler: @escaping ResumableDownloader.ProgressHandler
   ) {
     self.remoteUrl = remoteUrl
     self.localUrl = localUrl
     self.sha256 = sha256
     self.probe = probe
+    self.headers = headers
     self.handler = handler
     self.partUrl = localUrl.appendingPathExtension("partial")
     self.manifestUrl = localUrl.appendingPathExtension("partial.map")
@@ -274,7 +277,7 @@ extension SegmentedResumableDownloaderBackend {
       assignment = nextAssignment
       lock.unlock()
 
-      var request = URLRequest(url: remoteUrl)
+      var request = URLRequest(url: remoteUrl, headers: headers)
       request.setValue(
         "bytes=\(assignment.offset)-\(assignment.offset + Int64(assignment.length) - 1)",
         forHTTPHeaderField: "Range")
@@ -498,6 +501,14 @@ extension SegmentedResumableDownloaderBackend {
 }
 
 extension SegmentedResumableDownloaderBackend: URLSessionDataDelegate {
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(RedirectHeaderPolicy.redirectedRequest(request, from: response))
+  }
+
   func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
     lock.lock()
     let assignment = activeDownloads[task.taskIdentifier]?.assignment

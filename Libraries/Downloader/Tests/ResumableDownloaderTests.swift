@@ -383,6 +383,113 @@ final class ResumableDownloaderTests: XCTestCase {
       server.rangeRequestCount(forStartOffset: retryableStatusOffsets[0]), 2)
   }
 
+  func testHeadersAreSentWithEveryRequest() throws {
+    for backend in [ResumableDownloader.Backend.automatic, .downloadTask] {
+      let payload = makePayload(size: 3 * 1024 * 1024)
+      let server = try LocalRangeServer(payload: payload, chunkDelay: 0)
+      defer {
+        server.stop()
+      }
+      let destination = temporaryDirectory.appendingPathComponent("headers-\(backend).bin")
+      let downloader = ResumableDownloader(
+        remoteUrl: server.url, localUrl: destination,
+        sha256: Data(SHA256.hash(data: payload)).hexString, backend: backend,
+        headers: ["Authorization": "Bearer test-token", "X-Test": "1"])
+      XCTAssertNil(try download(downloader))
+      XCTAssertEqual(try Data(contentsOf: destination), payload)
+      let requests = server.recordedRequests()
+      XCTAssertGreaterThan(requests.count, 1)
+      for request in requests {
+        XCTAssertEqual(request.headers["authorization"], "Bearer test-token", request.method)
+        XCTAssertEqual(request.headers["x-test"], "1", request.method)
+      }
+    }
+  }
+
+  func testAuthorizationIsDroppedOnRedirectToAnotherHost() throws {
+    for backend in [ResumableDownloader.Backend.automatic, .downloadTask] {
+      let payload = makePayload(size: 3 * 1024 * 1024)
+      // The same machine under another host name, as a CDN would be.
+      let cdn = try LocalRangeServer(payload: payload, chunkDelay: 0, host: "localhost")
+      let origin = try LocalRangeServer(payload: Data([0]), chunkDelay: 0, redirectTo: cdn.url)
+      defer {
+        cdn.stop()
+        origin.stop()
+      }
+      let destination = temporaryDirectory.appendingPathComponent("redirect-\(backend).bin")
+      let downloader = ResumableDownloader(
+        remoteUrl: origin.url, localUrl: destination,
+        sha256: Data(SHA256.hash(data: payload)).hexString, backend: backend,
+        headers: ["Authorization": "Bearer test-token", "X-Test": "1"])
+      XCTAssertNil(try download(downloader))
+      XCTAssertEqual(try Data(contentsOf: destination), payload)
+      let originRequests = origin.recordedRequests()
+      XCTAssertFalse(originRequests.isEmpty)
+      for request in originRequests {
+        XCTAssertEqual(request.headers["authorization"], "Bearer test-token")
+      }
+      let cdnRequests = cdn.recordedRequests()
+      XCTAssertFalse(cdnRequests.isEmpty)
+      for request in cdnRequests {
+        XCTAssertNil(request.headers["authorization"], request.method)
+        XCTAssertEqual(request.headers["x-test"], "1", request.method)
+      }
+    }
+  }
+
+  func testRedirectPolicyKeepsAuthorizationOnlyOnTheSameHost() throws {
+    func redirect(from: String, to: String) -> URLRequest {
+      var request = URLRequest(url: URL(string: to)!)
+      request.setValue("Bearer test-token", forHTTPHeaderField: "Authorization")
+      request.setValue("1", forHTTPHeaderField: "X-Test")
+      let response = HTTPURLResponse(
+        url: URL(string: from)!, statusCode: 302, httpVersion: nil, headerFields: nil)!
+      return RedirectHeaderPolicy.redirectedRequest(request, from: response)
+    }
+    let sameHost = redirect(from: "https://huggingface.co/a", to: "https://huggingface.co/b")
+    XCTAssertEqual(sameHost.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
+    let cdn = redirect(from: "https://huggingface.co/a", to: "https://cdn-lfs.hf.co/b")
+    XCTAssertNil(cdn.value(forHTTPHeaderField: "Authorization"))
+    XCTAssertEqual(cdn.value(forHTTPHeaderField: "X-Test"), "1")
+    let insecure = redirect(from: "https://huggingface.co/a", to: "http://huggingface.co/b")
+    XCTAssertNil(insecure.value(forHTTPHeaderField: "Authorization"))
+  }
+
+  func testDownloadTaskErrorPageIsNotSavedAsTheFile() throws {
+    let server = try LocalRangeServer(payload: Data([0]), chunkDelay: 0, status: 403)
+    defer {
+      server.stop()
+    }
+    let destination = temporaryDirectory.appendingPathComponent("unauthorized.bin")
+    let downloader = ResumableDownloader(
+      remoteUrl: server.url, localUrl: destination, sha256: nil, backend: .downloadTask)
+    let error = try download(downloader)
+    guard case .server(403)? = error as? ResumableDownloader.DownloadError else {
+      return XCTFail("expected a 403 error, got \(String(describing: error))")
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+  }
+
+  /// Runs `downloader` to the end and returns the error it reported, if any.
+  private func download(_ downloader: ResumableDownloader) throws -> Error? {
+    let completion = expectation(description: "download-finished")
+    let lock = NSLock()
+    var reportedError: Error? = nil
+    var finished = false
+    downloader.resume { _, _, isComplete, error in
+      lock.lock()
+      defer { lock.unlock() }
+      guard !finished, isComplete || error != nil else { return }
+      finished = true
+      reportedError = error
+      completion.fulfill()
+    }
+    wait(for: [completion], timeout: 60)
+    lock.lock()
+    defer { lock.unlock() }
+    return reportedError
+  }
+
 }
 
 private func makePayload(size: Int) -> Data {
@@ -402,6 +509,9 @@ private final class LocalRangeServer {
   private var transientRangeFailuresToInject: Int
   private var shortRangeResponsesToInject: Int
   private var retryableStatusResponsesToInject: Int
+  private let redirectTo: URL?
+  private let status: Int?
+  private var requests: [(method: String, headers: [String: String])] = []
 
   private var rangeRequests: [ClosedRange<Int64>] = []
   private var transientFailureOffsets: [Int64] = []
@@ -413,8 +523,11 @@ private final class LocalRangeServer {
 
   init(
     payload: Data, chunkDelay: TimeInterval, transientRangeFailuresToInject: Int = 0,
-    shortRangeResponsesToInject: Int = 0, retryableStatusResponsesToInject: Int = 0
+    shortRangeResponsesToInject: Int = 0, retryableStatusResponsesToInject: Int = 0,
+    host: String = "127.0.0.1", redirectTo: URL? = nil, status: Int? = nil
   ) throws {
+    self.redirectTo = redirectTo
+    self.status = status
     self.payload = payload
     self.chunkDelay = chunkDelay
     self.transientRangeFailuresToInject = transientRangeFailuresToInject
@@ -436,11 +549,19 @@ private final class LocalRangeServer {
     guard let port = listener.port else {
       throw XCTSkip("Failed to acquire local listener port")
     }
-    url = URL(string: "http://127.0.0.1:\(port.rawValue)/payload.bin")!
+    url = URL(string: "http://\(host):\(port.rawValue)/payload.bin")!
   }
 
   func stop() {
     listener.cancel()
+  }
+
+  func recordedRequests() -> [(method: String, headers: [String: String])] {
+    stateLock.lock()
+    defer {
+      stateLock.unlock()
+    }
+    return requests
   }
 
   func rangeRequestCount(forStartOffset startOffset: Int64) -> Int {
@@ -526,6 +647,25 @@ private final class LocalRangeServer {
           in: .whitespacesAndNewlines)
         return (key, value)
       })
+    stateLock.lock()
+    requests.append((method, headers))
+    stateLock.unlock()
+    if let redirectTo {
+      let response =
+        "HTTP/1.1 302 Found\r\nLocation: \(redirectTo.absoluteString)\r\nContent-Length: 0\r\n\r\n"
+      connection.send(
+        content: Data(response.utf8),
+        completion: .contentProcessed { _ in connection.cancel() })
+      return
+    }
+    if let status {
+      let response =
+        "HTTP/1.1 \(status) Error\r\nContent-Length: 5\r\n\r\n" + (method == "HEAD" ? "" : "error")
+      connection.send(
+        content: Data(response.utf8),
+        completion: .contentProcessed { _ in connection.cancel() })
+      return
+    }
 
     let fullRange = 0...Int64(payload.count - 1)
     let hasRangeHeader = headers["range"] != nil

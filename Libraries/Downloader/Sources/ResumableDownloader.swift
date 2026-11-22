@@ -20,6 +20,10 @@ public final class ResumableDownloader: NSObject {
   public let localUrl: URL
   public let sha256: String?
   public let backend: Backend
+  /// Sent with every request (the HEAD probe, ranged GETs and the download task), for example
+  /// an `Authorization` header for a server that needs a token. A redirect to another host drops
+  /// `Authorization` (`RedirectHeaderPolicy`), so a token never reaches a CDN.
+  public let headers: [String: String]
 
   private let lock = NSLock()
   private var probeSession: URLSession? = nil
@@ -32,12 +36,14 @@ public final class ResumableDownloader: NSObject {
   #endif
 
   public init(
-    remoteUrl: URL, localUrl: URL, sha256: String?, backend: Backend = .automatic
+    remoteUrl: URL, localUrl: URL, sha256: String?, backend: Backend = .automatic,
+    headers: [String: String] = [:]
   ) {
     self.remoteUrl = remoteUrl
     self.localUrl = localUrl
     self.sha256 = sha256
     self.backend = backend
+    self.headers = headers
   }
 
   deinit {
@@ -47,10 +53,11 @@ public final class ResumableDownloader: NSObject {
 
   @discardableResult
   public static func probe(
-    remoteUrl: URL, completionHandler: @escaping (Result<URLDownloadProbe, Error>) -> Void
+    remoteUrl: URL, headers: [String: String] = [:],
+    completionHandler: @escaping (Result<URLDownloadProbe, Error>) -> Void
   ) -> URLSessionDataTask {
     let probeSession = URLSession(configuration: .default)
-    var request = URLRequest(url: remoteUrl)
+    var request = URLRequest(url: remoteUrl, headers: headers)
     request.httpMethod = "HEAD"
     let probeTask = probeSession.dataTask(with: request) { _, response, error in
       defer {
@@ -74,6 +81,7 @@ public final class ResumableDownloader: NSObject {
       }
       completionHandler(.success(probe))
     }
+    probeTask.delegate = RedirectHeaderPolicy()
     probeTask.resume()
     return probeTask
   }
@@ -89,7 +97,7 @@ public final class ResumableDownloader: NSObject {
     beginBackgroundTaskLocked()
     lock.unlock()
 
-    var request = URLRequest(url: remoteUrl)
+    var request = URLRequest(url: remoteUrl, headers: headers)
     request.httpMethod = "HEAD"
 
     var probeTask: URLSessionDataTask!
@@ -107,6 +115,8 @@ public final class ResumableDownloader: NSObject {
     }
     self.probeTask = probeTask
     lock.unlock()
+    // The probe session has no delegate of its own; the task's handles its redirects.
+    probeTask.delegate = RedirectHeaderPolicy()
     probeTask.resume()
   }
 
@@ -182,6 +192,7 @@ extension ResumableDownloader {
         localUrl: localUrl,
         sha256: sha256,
         probe: probe,
+        headers: headers,
         handler: wrappedHandler)
       lock.lock()
       guard generation == token else {
@@ -223,6 +234,7 @@ extension ResumableDownloader {
       localUrl: localUrl,
       sha256: sha256,
       expectedLength: probe?.expectedLength,
+      headers: headers,
       handler: wrappedHandler)
     lock.lock()
     guard generation == token else {
@@ -294,6 +306,39 @@ extension ResumableDownloader {
       UIApplication.shared.endBackgroundTask(backgroundTask)
       self.backgroundTask = nil
     #endif
+  }
+}
+
+/// Drops `Authorization` from a redirected request that goes to another host. URLSession copies
+/// a request's headers onto the request it redirects to, and a server that redirects a download
+/// to a CDN (Hugging Face sends LFS files to signed CDN URLs) must not hand that host the token.
+final class RedirectHeaderPolicy: NSObject, URLSessionTaskDelegate {
+  static func redirectedRequest(_ request: URLRequest, from response: HTTPURLResponse)
+    -> URLRequest
+  {
+    let fromHost = response.url?.host?.lowercased()
+    let toHost = request.url?.host?.lowercased()
+    guard fromHost != toHost || response.url?.scheme != request.url?.scheme else { return request }
+    var request = request
+    request.setValue(nil, forHTTPHeaderField: "Authorization")
+    return request
+  }
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(Self.redirectedRequest(request, from: response))
+  }
+}
+
+extension URLRequest {
+  init(url: URL, headers: [String: String]) {
+    self.init(url: url)
+    for (field, value) in headers {
+      setValue(value, forHTTPHeaderField: field)
+    }
   }
 }
 

@@ -5,6 +5,7 @@ final class URLSessionDownloadTaskResumableDownloaderBackend: NSObject, Download
   private let localUrl: URL
   private let sha256: String?
   private let expectedLength: Int64?
+  private let headers: [String: String]
   private let handler: ResumableDownloader.ProgressHandler
   private let lock = NSLock()
   private lazy var session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
@@ -18,8 +19,10 @@ final class URLSessionDownloadTaskResumableDownloaderBackend: NSObject, Download
     localUrl: URL,
     sha256: String?,
     expectedLength: Int64?,
+    headers: [String: String] = [:],
     handler: @escaping ResumableDownloader.ProgressHandler
   ) {
+    self.headers = headers
     self.remoteUrl = remoteUrl
     self.localUrl = localUrl
     self.sha256 = sha256
@@ -79,7 +82,7 @@ final class URLSessionDownloadTaskResumableDownloaderBackend: NSObject, Download
     if let resumeData {
       task = session.downloadTask(withResumeData: resumeData)
     } else {
-      task = session.downloadTask(with: URLRequest(url: remoteUrl))
+      task = session.downloadTask(with: URLRequest(url: remoteUrl, headers: headers))
     }
     lock.lock()
     guard !isCancelled, !didFinish else {
@@ -115,6 +118,14 @@ final class URLSessionDownloadTaskResumableDownloaderBackend: NSObject, Download
 
 extension URLSessionDownloadTaskResumableDownloaderBackend: URLSessionDownloadDelegate {
   func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(RedirectHeaderPolicy.redirectedRequest(request, from: response))
+  }
+
+  func urlSession(
     _ session: URLSession,
     downloadTask: URLSessionDownloadTask,
     didResumeAtOffset fileOffset: Int64,
@@ -146,6 +157,15 @@ extension URLSessionDownloadTaskResumableDownloaderBackend: URLSessionDownloadDe
     didFinish = true
     task = nil
     lock.unlock()
+
+    // A download task saves an error page like any other body; don't keep it as the file.
+    if let httpResponse = downloadTask.response as? HTTPURLResponse,
+      httpResponse.statusCode >= 400
+    {
+      session.invalidateAndCancel()
+      handler(0, 0, false, ResumableDownloader.DownloadError.server(httpResponse.statusCode))
+      return
+    }
 
     do {
       if let sha256 {
