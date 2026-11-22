@@ -865,7 +865,7 @@ extension UNetFromNNC {
             : nil
           if usesLoRA {
             return LoRAMiniMaxH3(
-              hiddenSize: 5_376, layers: usesTeaCache ? 49 : 50,
+              hiddenSize: 5_376, layers: layout.layers.count - (usesTeaCache ? 1 : 0),
               startLayer: usesTeaCache ? 1 : 0,
               textLength: textLength, audioLength: audioLength,
               videoFrames: videoFrames, videoHeight: videoHeight, videoWidth: videoWidth,
