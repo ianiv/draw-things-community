@@ -453,22 +453,23 @@ extension UNetFixedEncoder {
       let isLoHa = lora.contains { $0.isLoHa }
       var configuration = LoRANetworkConfiguration(rank: rankOfLoRA, scale: 1, highPrecision: false)
       let runLoRASeparatelyIsPreferred = isQuantizedModel || externalOnDemand || isBF16
-      // The LoRA graphs only know the stock layout; compressed checkpoints merge LoRAs instead.
+      // The LoRA graphs build dense 50-block layouts (the stock model and MiniMax H3 Image);
+      // compressed checkpoints merge LoRAs instead.
       let shouldRunLoRASeparately =
         !lora.isEmpty && !isLoHa && runLoRASeparatelyIsPreferred && rankOfLoRA > 0
-        && canRunLoRASeparately && layout.isStandard
+        && canRunLoRASeparately && layout.runsLoRASeparately
       let unetFixed: Model
       if shouldRunLoRASeparately {
         configuration.keys = LoRALoader.keys(graph, of: lora.map { $0.file }, modelFile: filePath)
         unetFixed =
           LoRAMiniMaxH3Fixed(
-            timesteps: timesteps.count, hiddenSize: 5_376, layers: 50,
+            timesteps: timesteps.count, hiddenSize: 5_376, layers: layout.layers.count,
             textLength: (
               isCfgEnabled ? tokenLengthUncond + visionLength : 0, tokenLengthCond + visionLength
             ),
             usesFlashAttention: valueOr(usesFlashAttention, .scale1),
             referenceImageCount: referenceImageCount, referenceAudioCount: referenceAudioCount,
-            visionLength: visionLength, LoRAConfiguration: configuration
+            visionLength: visionLength, layout: layout, LoRAConfiguration: configuration
           ).1
       } else {
         unetFixed =

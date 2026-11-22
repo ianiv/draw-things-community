@@ -77,6 +77,13 @@ public struct MiniMaxH3Layout: Equatable, Sendable {
   /// Stacked output heads (one per sigma-grid interval), 1 for ordinary checkpoints.
   public var outputHeads: Int { max(1, sigmaGrid.count - 1) }
   public var usesTimeCurve: Bool { timeCurveGrid > 0 }
+  /// Whether `LoRAMiniMaxH3` and `LoRAMiniMaxH3Fixed` can build this layout, so a LoRA can run
+  /// beside the (quantized) weights instead of being merged into them: all 50 blocks, dense, with a
+  /// single-time embedder or a time curve. That covers the stock video model and MiniMax H3 Image
+  /// (with or without a layout record); compressed checkpoints such as HyperFlow merge LoRAs.
+  public var runsLoRASeparately: Bool {
+    layers == Array(0..<50) && ranks.isEmpty && endpointGate == nil
+  }
 
   /// The sigma grid of the MiniMax-H3-Image release (`pdd_config.json`).
   public static let imageSigmaGrid: [Double] = [

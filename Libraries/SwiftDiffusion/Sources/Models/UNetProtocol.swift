@@ -796,7 +796,8 @@ extension UNetFromNNC {
       // per batch item and is not tiled.
       let hasAudio = layout.hasAudio
       precondition(hasAudio == (version == .minimaxH3))
-      // TeaCache and the separate-LoRA graphs only know the stock 50-block layout.
+      // TeaCache only knows the stock 50-block layout; the separate-LoRA graphs also build the
+      // other dense 50-block layouts (MiniMax H3 Image), see `runsLoRASeparately`.
       let usesTeaCache = isTeaCacheEnabled && layout.isStandard
       let textLength = isCfgEnabled ? max(tokenLengthUncond, tokenLengthCond) : tokenLengthCond
       let visionLength = c[0].shape[1] - textLength
@@ -817,7 +818,7 @@ extension UNetFromNNC {
       tileScaleFactor = 4
       didRunLoRASeparately =
         !lora.isEmpty && rankOfLoRA > 0 && !isLoHa && runLoRASeparatelyIsPreferred
-        && canRunLoRASeparately && layout.isStandard
+        && canRunLoRASeparately && layout.runsLoRASeparately
       if didRunLoRASeparately {
         configuration.keys = LoRALoader.keys(graph, of: lora.map { $0.file }, modelFile: filePath)
       }
@@ -872,7 +873,7 @@ extension UNetFromNNC {
               usesSolAttention: solAttention,
               referenceImageSizes: referenceImageSizes,
               referenceAudioLengths: referenceAudioLengths,
-              visionLength: visionLength, outputResidual: usesTeaCache,
+              visionLength: visionLength, outputResidual: usesTeaCache, layout: layout,
               LoRAConfiguration: configuration
             ).1
           }
@@ -2673,7 +2674,9 @@ extension UNetFromNNC {
                   return ($0, $0)
                 })
             case .minimaxH3, .minimaxH3Image:
-              let layers = MiniMaxH3Layout.load(filePath: filePath).layers.count
+              let layers = MiniMaxH3Layout.load(
+                filePath: filePath, isImage: version == .minimaxH3Image
+              ).layers.count
               return [Int: Int](uniqueKeysWithValues: (0..<layers).map { ($0, $0) })
             case .kandinsky21, .svdI2v, .wurstchenStageC, .wurstchenStageB, .seedvr2_3b,
               .seedvr2_7b, .fibo2:
