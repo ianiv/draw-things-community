@@ -4594,7 +4594,8 @@ extension LocalImageGenerator {
         )
       } ?? (false, [], 0, [:], [:], [:], [:])
     let is8BitModel = ModelZoo.is8BitModel(file)
-    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately
+    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately(
+      isQuantizedModel: isQuantizedModel)
     let externalOnDemand = modelPreloader.externalOnDemand(
       version: modelVersion,
       scale: DeviceCapability.Scale(
@@ -6038,7 +6039,8 @@ extension LocalImageGenerator {
     let strength = configuration.strength
     let isQuantizedModel = ModelZoo.isQuantizedModel(file)
     let is8BitModel = ModelZoo.is8BitModel(file)
-    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately
+    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately(
+      isQuantizedModel: isQuantizedModel)
     let externalOnDemand = modelPreloader.externalOnDemand(
       version: modelVersion,
       scale: DeviceCapability.Scale(
@@ -7659,7 +7661,8 @@ extension LocalImageGenerator {
       scale: imageScale)
     let isQuantizedModel = ModelZoo.isQuantizedModel(file)
     let is8BitModel = ModelZoo.is8BitModel(file)
-    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately
+    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately(
+      isQuantizedModel: isQuantizedModel)
     let externalOnDemand = modelPreloader.externalOnDemand(
       version: modelVersion,
       scale: DeviceCapability.Scale(
@@ -8630,7 +8633,8 @@ extension LocalImageGenerator {
       scale: imageScale)
     let isQuantizedModel = ModelZoo.isQuantizedModel(file)
     let is8BitModel = ModelZoo.is8BitModel(file)
-    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately
+    let canRunLoRASeparately = modelPreloader.canRunLoRASeparately(
+      isQuantizedModel: isQuantizedModel)
     let externalOnDemand = modelPreloader.externalOnDemand(
       version: modelVersion,
       scale: DeviceCapability.Scale(

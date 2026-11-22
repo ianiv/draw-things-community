@@ -504,7 +504,7 @@ extension ModelPreloader {
         false, []
       )
     let isQuantizedModel = ModelZoo.isQuantizedModel(modelFile)
-    let canRunLoRASeparately = canRunLoRASeparately
+    let canRunLoRASeparately = canRunLoRASeparately(isQuantizedModel: isQuantizedModel)
     let upcastAttention = ModelZoo.isUpcastAttentionForModel(modelFile)
     let modelModifier = ModelZoo.modifierForModel(modelFile)
     let autoencoderPath = ModelZoo.filePathForModelDownloaded(autoencoderModel)
@@ -1221,6 +1221,16 @@ extension ModelPreloader {
 extension ModelPreloader {
   var canRunLoRASeparately: Bool {
     (mergeLoRA ?? 0) == 0
+  }
+
+  /// Whether LoRAs may run beside the weights of a model, rather than merge into them. Merge LoRA
+  /// "Always" applies to full-precision models only: merging dequantizes every touched weight of a
+  /// quantized model to FP16 (MiniMax H3 Image 8-bit: ~38 GiB, ~115 s/step at 512 in swap), and
+  /// re-quantizing the merged weights rounds most of the LoRA delta away (measured on H3 Image
+  /// 8-bit: the result sat closer to no LoRA than to the LoRA). Each model version's gate still
+  /// decides whether its graph can run LoRAs separately; if not, it merges as before.
+  func canRunLoRASeparately(isQuantizedModel: Bool) -> Bool {
+    canRunLoRASeparately || isQuantizedModel
   }
 }
 
