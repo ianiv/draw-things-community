@@ -21,7 +21,7 @@ func SeedVR2Conv3DToConv2D<FloatType: TensorNumeric & BinaryFloatingPoint>(
   guard let originalTensor = store.read(name, kind: .CPU, codec: [.jit, externalData]) else {
     return .continue(name)
   }
-  let tensor = Tensor<FloatType>(from: originalTensor)
+  let tensor = Tensor<FloatType>(bfloat16SafeFrom: originalTensor)
   let targetCount = shape.reduce(1, *)
   let sourceCount = tensor.shape.reduce(1, *)
 

@@ -762,7 +762,7 @@ extension FirstStage {
               guard
                 var tensor =
                   (store.read(name, kind: .CPU, codec: [.jit, externalData]).map {
-                    Tensor<FloatType>(from: $0)
+                    Tensor<FloatType>(bfloat16SafeFrom: $0)
                   })
               else {
                 return .continue(name)
@@ -869,7 +869,7 @@ extension FirstStage {
               guard
                 var tensor =
                   (store.read(name, kind: .CPU, codec: [.jit, externalData]).map {
-                    Tensor<FloatType>(from: $0)
+                    Tensor<FloatType>(bfloat16SafeFrom: $0)
                   })
               else {
                 return .continue(name)
@@ -1935,7 +1935,7 @@ extension FirstStage {
               guard
                 var tensor =
                   (store.read(name, kind: .CPU, codec: [.jit, externalData]).map {
-                    Tensor<FloatType>(from: $0)
+                    Tensor<FloatType>(bfloat16SafeFrom: $0)
                   })
               else {
                 return .continue(name)
@@ -2032,7 +2032,7 @@ extension FirstStage {
               guard
                 var tensor =
                   (store.read(name, kind: .CPU, codec: [.jit, externalData]).map {
-                    Tensor<FloatType>(from: $0)
+                    Tensor<FloatType>(bfloat16SafeFrom: $0)
                   })
               else {
                 return .continue(name)

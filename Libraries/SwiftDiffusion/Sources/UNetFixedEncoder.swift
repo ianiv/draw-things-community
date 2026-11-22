@@ -533,7 +533,8 @@ extension UNetFixedEncoder {
               guard let tensor else { return result }
               return .final(
                 graph.withNoGrad {
-                  (0.25 * graph.variable(Tensor<FloatType>(from: tensor)).toGPU(0)).rawValue.toCPU()
+                  (0.25 * graph.variable(Tensor<FloatType>(bfloat16SafeFrom: tensor)).toGPU(0))
+                    .rawValue.toCPU()
                 })
             }
           }
@@ -2789,7 +2790,7 @@ extension UNetFixedEncoder {
             (store.read(
               "x_pad_token", kind: .CPU, codec: [.jit, .q6p, .q8p, .i8x, .ezm7, externalData]
             )
-            .map { Tensor<FloatType>(from: $0) })
+            .map { Tensor<FloatType>(bfloat16SafeFrom: $0) })
         {
           let padToken = xPadToken.reshaped(.HWC(1, 1, 3840))
           for i in 0..<shape[0] {
@@ -2802,7 +2803,7 @@ extension UNetFixedEncoder {
           let capPadToken =
             (store.read(
               "cap_pad_token", kind: .CPU, codec: [.jit, .q6p, .q8p, .i8x, .ezm7, externalData]
-            ).map { Tensor<FloatType>(from: $0) })
+            ).map { Tensor<FloatType>(bfloat16SafeFrom: $0) })
         {
           let padToken = capPadToken.reshaped(.HWC(1, 1, 3840))
           for i in 0..<shape[0] {
@@ -3796,7 +3797,7 @@ extension UNetFixedEncoder {
           (store.read(
             "text_video_connector_learnable_registers",
             codec: [.externalData, .q6p, .q8p, .i8x, .ezm7]
-          ).map { Tensor<FloatType>(from: $0).toGPU(0) })
+          ).map { Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0) })
         {
           let registers = graph.variable(videoConnectorLearnableRegisters).reshaped(
             .HWC(1, 128, 4096))
@@ -3811,7 +3812,7 @@ extension UNetFixedEncoder {
           (store.read(
             "text_audio_connector_learnable_registers",
             codec: [.externalData, .q6p, .q8p, .i8x, .ezm7]
-          ).map { Tensor<FloatType>(from: $0).toGPU(0) })
+          ).map { Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0) })
         {
           let registers = graph.variable(audioConnectorLearnableRegisters).reshaped(
             .HWC(1, 128, 2048))
@@ -4105,7 +4106,7 @@ extension UNetFixedEncoder {
           (store.read(
             "text_video_connector_learnable_registers",
             codec: [.externalData, .q6p, .q8p, .i8x, .ezm7]
-          ).map { Tensor<FloatType>(from: $0).toGPU(0) })
+          ).map { Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0) })
         {
           let registers = graph.variable(videoConnectorLearnableRegisters).reshaped(
             .HWC(1, 128, 3840))
@@ -4120,7 +4121,7 @@ extension UNetFixedEncoder {
           (store.read(
             "text_audio_connector_learnable_registers",
             codec: [.externalData, .q6p, .q8p, .i8x, .ezm7]
-          ).map { Tensor<FloatType>(from: $0).toGPU(0) })
+          ).map { Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0) })
         {
           let registers = graph.variable(audioConnectorLearnableRegisters).reshaped(
             .HWC(1, 128, 3840))

@@ -110,6 +110,15 @@ swift_test(
 )
 
 swift_test(
+    name = "BFloat16ConversionTests",
+    srcs = ["Tests/BFloat16ConversionTests.swift"],
+    deps = [
+        ":SwiftDiffusion",
+        "@s4nnc//nnc",
+    ],
+)
+
+swift_test(
     name = "SamplerTests",
     srcs = ["Tests/SamplerTests.swift"],
     tags = [

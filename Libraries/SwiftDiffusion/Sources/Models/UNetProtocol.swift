@@ -2719,7 +2719,8 @@ extension UNetFromNNC {
                       let scaleFactor: Float = 8
                       return
                         ((1 / scaleFactor)
-                        * graph.variable(Tensor<FloatType>(from: tensor)).toGPU(0)).rawValue.toCPU()
+                        * graph.variable(Tensor<FloatType>(bfloat16SafeFrom: tensor)).toGPU(0))
+                        .rawValue.toCPU()
                     })
                 }
                 let result: DynamicGraph.Store.ModelReaderResult
@@ -2790,7 +2791,8 @@ extension UNetFromNNC {
                       let scaleFactor: Float = 8
                       return
                         ((1 / scaleFactor)
-                        * graph.variable(Tensor<FloatType>(from: tensor)).toGPU(0)).rawValue.toCPU()
+                        * graph.variable(Tensor<FloatType>(bfloat16SafeFrom: tensor)).toGPU(0))
+                        .rawValue.toCPU()
                     })
                 }
                 let result: DynamicGraph.Store.ModelReaderResult
@@ -2859,7 +2861,8 @@ extension UNetFromNNC {
                 graph.withNoGrad {
                   let scaleFactor: Float = 8
                   return
-                    ((1 / scaleFactor) * graph.variable(Tensor<FloatType>(from: tensor)).toGPU(0))
+                    ((1 / scaleFactor)
+                    * graph.variable(Tensor<FloatType>(bfloat16SafeFrom: tensor)).toGPU(0))
                     .rawValue.toCPU()
                 })
             }

@@ -4,6 +4,21 @@ import NNC
 
 private let LoRALoaderShapeMismatchKeys: Set<String> = Set(["__dit__[t-x_embedder-0-0]"])
 
+extension Tensor {
+  /// `Tensor(from:)`, except that BFloat16 → Float16 goes by way of Float32. The CPU datatype
+  /// conversion for that pair, ccv's `ccv_bfloat_to_half_precision` (lib/ccv_util.c), reads its
+  /// output buffer (`f[i]`) instead of its input (`h[i]`), so a direct conversion returns garbage.
+  /// BFloat16 → Float32 (`ccv_bfloat_to_float`) and Float32 → Float16 are both correct. Use this
+  /// for any tensor read from a store that may hold BFloat16 weights (merged LoRA, patched biases).
+  public init(bfloat16SafeFrom tensor: AnyTensor) {
+    if tensor.dataType == .BFloat16 && Element.dataType == .Float16 {
+      self.init(from: Tensor<Float32>(from: tensor))
+    } else {
+      self.init(from: tensor)
+    }
+  }
+}
+
 public struct LoRALoader {
   private static func _openStore(
     _ graph: DynamicGraph, lora: [LoRAConfiguration], index: Int,
@@ -185,11 +200,11 @@ public struct LoRALoader {
       let formattedTensor: Tensor<FloatType>
       let newRank: Int
       if isMoE {
-        formattedTensor = Tensor<FloatType>(from: loadedTensor).reshaped(
+        formattedTensor = Tensor<FloatType>(bfloat16SafeFrom: loadedTensor).reshaped(
           .HWC(loadedTensor.shape[0], loadedTensor.shape[1], loadedTensor.shape[2...].reduce(1, *)))
         newRank = isUp ? formattedTensor.shape[2] : formattedTensor.shape[1]
       } else {
-        formattedTensor = Tensor<FloatType>(from: loadedTensor).reshaped(
+        formattedTensor = Tensor<FloatType>(bfloat16SafeFrom: loadedTensor).reshaped(
           .NC(loadedTensor.shape[0], loadedTensor.shape[1...].reduce(1, *)))
         newRank = isUp ? formattedTensor.shape[1] : formattedTensor.shape[0]
       }
@@ -222,7 +237,7 @@ public struct LoRALoader {
           }
           let down = graph.variable(
             formattedTensor[0..<newRank, 0..<formattedTensor.shape[1]].toGPU(0))
-          let loraMidTensor = Tensor<FloatType>(from: loraMid)
+          let loraMidTensor = Tensor<FloatType>(bfloat16SafeFrom: loraMid)
           let mid = graph.variable(loraMidTensor.toGPU(0))
           var midDown = mid.transposed(0, 1)
           midDown = midDown.reshaped(.NC(midDown.shape[0], midDown.shape[1...].reduce(1, *)))
@@ -275,7 +290,7 @@ public struct LoRALoader {
           }
           let down = graph.variable(
             formattedTensor[0..<newRank, 0..<formattedTensor.shape[1]].toGPU(0))
-          let loraMidTensor = Tensor<FloatType>(from: loraMid)
+          let loraMidTensor = Tensor<FloatType>(bfloat16SafeFrom: loraMid)
           let mid = graph.variable(loraMidTensor.toGPU(0))
           var midDown = mid.transposed(0, 1)
           midDown = midDown.reshaped(.NC(midDown.shape[0], midDown.shape[1...].reduce(1, *)))
@@ -315,7 +330,7 @@ public struct LoRALoader {
     guard
       let original =
         (store.read(name, kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData]).map {
-          graph.variable(Tensor<FloatType>(from: $0).toGPU(0))
+          graph.variable(Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0))
         })
     else { return nil }
     let originalShape = original.shape
@@ -409,7 +424,7 @@ public struct LoRALoader {
     guard
       let original =
         (store.read(name, kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData]).map {
-          Tensor<FloatType>(from: $0)
+          Tensor<FloatType>(bfloat16SafeFrom: $0)
         })
     else {
       return .continue(name)
@@ -465,28 +480,28 @@ public struct LoRALoader {
             let loHaW2B = store.read(
               prefix + name + "__w2_b__", kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData])
           else { continue }
-          let w1ATensor = Tensor<FloatType>(from: loHaW1A)
+          let w1ATensor = Tensor<FloatType>(bfloat16SafeFrom: loHaW1A)
           let w1A = graph.variable(
             w1ATensor.reshaped(
               .NC(
                 w1ATensor.shape[0],
                 w1ATensor.shape[1...].reduce(1, *))
             ).toGPU(0))
-          let w1BTensor = Tensor<FloatType>(from: loHaW1B)
+          let w1BTensor = Tensor<FloatType>(bfloat16SafeFrom: loHaW1B)
           let w1B = graph.variable(
             w1BTensor.reshaped(
               .NC(
                 w1BTensor.shape[0],
                 w1BTensor.shape[1...].reduce(1, *))
             ).toGPU(0))
-          let w2ATensor = Tensor<FloatType>(from: loHaW2A)
+          let w2ATensor = Tensor<FloatType>(bfloat16SafeFrom: loHaW2A)
           let w2A = graph.variable(
             w2ATensor.reshaped(
               .NC(
                 w2ATensor.shape[0],
                 w2ATensor.shape[1...].reduce(1, *))
             ).toGPU(0))
-          let w2BTensor = Tensor<FloatType>(from: loHaW2B)
+          let w2BTensor = Tensor<FloatType>(bfloat16SafeFrom: loHaW2B)
           let w2B = graph.variable(
             w2BTensor.reshaped(
               .NC(
@@ -514,19 +529,19 @@ public struct LoRALoader {
               original = loadOriginal(graph, name: name, store: mainStore, shape: shape)
             }
             original = original.map {
-              let diff = graph.variable(Tensor<FloatType>(from: diff).toGPU(0))
+              let diff = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: diff).toGPU(0))
               return addWeight(original: $0, diff: diff, weight: weight)
             }
             continue
           }
-          let loraUpTensor = Tensor<FloatType>(from: loraUp)
+          let loraUpTensor = Tensor<FloatType>(bfloat16SafeFrom: loraUp)
           let up = graph.variable(
             loraUpTensor.reshaped(
               .NC(
                 loraUpTensor.shape[0],
                 loraUpTensor.shape[1...].reduce(1, *))
             ).toGPU(0))
-          let loraDownTensor = Tensor<FloatType>(from: loraDown)
+          let loraDownTensor = Tensor<FloatType>(bfloat16SafeFrom: loraDown)
           let down = graph.variable(
             loraDownTensor.reshaped(
               .NC(
@@ -545,7 +560,7 @@ public struct LoRALoader {
             }
             continue
           }
-          let loraMidTensor = Tensor<FloatType>(from: loraMid)
+          let loraMidTensor = Tensor<FloatType>(bfloat16SafeFrom: loraMid)
           let mid = graph.variable(loraMidTensor.toGPU(0))
           var midDown = mid.transposed(0, 1)
           midDown = midDown.reshaped(.NC(midDown.shape[0], midDown.shape[1...].reduce(1, *)))
@@ -577,14 +592,14 @@ public struct LoRALoader {
             let loHaW2B = store.read(
               prefix + name + "__w2_b__", kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData])
           else { continue }
-          let w1A = graph.variable(Tensor<FloatType>(from: loHaW1A).toGPU(0))
-          let w1B = graph.variable(Tensor<FloatType>(from: loHaW1B).toGPU(0))
-          let w2A = graph.variable(Tensor<FloatType>(from: loHaW2A).toGPU(0))
-          let w2B = graph.variable(Tensor<FloatType>(from: loHaW2B).toGPU(0))
+          let w1A = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: loHaW1A).toGPU(0))
+          let w1B = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: loHaW1B).toGPU(0))
+          let w2A = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: loHaW2A).toGPU(0))
+          let w2B = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: loHaW2B).toGPU(0))
           if original == nil {
             original = mainStore.read(name, kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData])
               .map {
-                graph.variable(Tensor<FloatType>(from: $0).toGPU(0))
+                graph.variable(Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0))
               }
           }
           original = original.map {
@@ -605,17 +620,17 @@ public struct LoRALoader {
               original = mainStore.read(
                 name, kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData]
               ).map {
-                graph.variable(Tensor<FloatType>(from: $0).toGPU(0))
+                graph.variable(Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0))
               }
             }
             original = original.map {
-              let diff = graph.variable(Tensor<FloatType>(from: diff).toGPU(0))
+              let diff = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: diff).toGPU(0))
               return addWeight(original: $0, diff: diff, weight: weight)
             }
             continue
           }
-          let up = graph.variable(Tensor<FloatType>(from: loraUp).toGPU(0))
-          let down = graph.variable(Tensor<FloatType>(from: loraDown).toGPU(0))
+          let up = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: loraUp).toGPU(0))
+          let down = graph.variable(Tensor<FloatType>(bfloat16SafeFrom: loraDown).toGPU(0))
           guard
             let loraMid = store.read(
               prefix + name + "__mid__", kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData])
@@ -624,7 +639,7 @@ public struct LoRALoader {
               original = mainStore.read(
                 name, kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData]
               ).map {
-                graph.variable(Tensor<FloatType>(from: $0).toGPU(0))
+                graph.variable(Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0))
               }
             }
             original = original.map {
@@ -632,7 +647,7 @@ public struct LoRALoader {
             }
             continue
           }
-          let loraMidTensor = Tensor<FloatType>(from: loraMid)
+          let loraMidTensor = Tensor<FloatType>(bfloat16SafeFrom: loraMid)
           let mid = graph.variable(loraMidTensor.toGPU(0))
           var midDown = mid.transposed(0, 1)
           midDown = midDown.reshaped(.NC(midDown.shape[0], midDown.shape[1...].reduce(1, *)))
@@ -644,7 +659,7 @@ public struct LoRALoader {
           if original == nil {
             original = mainStore.read(name, kind: .CPU, codec: [.q6p, .q8p, .ezm7, .externalData])
               .map {
-                graph.variable(Tensor<FloatType>(from: $0).toGPU(0))
+                graph.variable(Tensor<FloatType>(bfloat16SafeFrom: $0).toGPU(0))
               }
           }
           original = original.map {
