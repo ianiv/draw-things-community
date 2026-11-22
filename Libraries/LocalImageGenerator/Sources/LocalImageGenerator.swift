@@ -9076,6 +9076,15 @@ extension LocalImageGenerator {
           initNegMaskMaybe = nil
         }
       }
+      // The first pass (the transparent area, code 1) runs up to the start step; the second
+      // continues it from there. When the start step falls in the last step, rounding it up runs
+      // the whole schedule, so the first pass's result is clean, yet the second pass hands it to
+      // the model as noisy as the start step: so far out of range that a few-step run (Z-Image
+      // Turbo, 2 steps at strength 0.7) comes back NaN. Stop before the last step instead, at the
+      // rounded-down step, a little noisier than the start rather than not at all.
+      let firstPassEndStep =
+        initTimestep.roundedUpStartStep >= sampling.steps
+        ? initTimestep.roundedDownStartStep : initTimestep.roundedUpStartStep
       let intermediateResultWithError = sampler.sample(
         noise,
         unets: modelPreloader.retrieveUNet(
@@ -9090,7 +9099,7 @@ extension LocalImageGenerator {
         textGuidanceScale: textGuidanceScale, imageGuidanceScale: imageGuidanceScale,
         guidanceEmbed: guidanceEmbed,
         startStep: (integral: 0, fractional: 0),
-        endStep: (integral: initTimestep.roundedUpStartStep, fractional: initTimestep.startStep),
+        endStep: (integral: firstPassEndStep, fractional: initTimestep.startStep),
         originalSize: originalSize,
         cropTopLeft: cropTopLeft, targetSize: targetSize, aestheticScore: aestheticScore,
         negativeOriginalSize: negativeOriginalSize,
