@@ -4113,6 +4113,14 @@ extension LocalImageGenerator {
         if modifier == .fl2va {
           height = startHeight * 16
           width = startWidth * 16
+        } else if frames > 1 {
+          // The reference clip goes on a canvas of its own aspect ratio, by the rule the generated
+          // video's canvas follows: diffusers' `resolve_canvas_size` (modular_pipelines/minimax_h3/
+          // modular_pipeline.py), which MiniMax's `_normalize_video` (before_encoder.py) applies to
+          // a reference video, unlike a picture.
+          let canvas = Self.minimaxH3CanvasSize(width: shape[2], height: shape[1])
+          height = canvas.height
+          width = canvas.width
         } else {
           let scale = min(
             1, sqrt(Double(startHeight * startWidth * 256) / Double(shape[1] * shape[2])))
@@ -4133,6 +4141,35 @@ extension LocalImageGenerator {
     case .double, .editing, .inpainting, .none:
       return (nil, [])
     }
+  }
+
+  /// MiniMax H3's canvas for an aspect ratio, as diffusers' `resolve_canvas_size` makes it with
+  /// the released checkpoint's settings: the short edge at 768, the area capped at 768 × 1344, both
+  /// sides rounded to the nearest multiple of 32 (Python's `round`, half to even), at least 32. The
+  /// ratio is held to the 1:4 to 4:1 it was trained over, which diffusers refuses outside of.
+  /// Returns (height, width).
+  static func minimaxH3CanvasSize(width: Int, height: Int) -> (height: Int, width: Int) {
+    let shortEdge = 768.0
+    let maxPixels = 768.0 * 1344
+    let multiple = 32.0
+    let ratio = min(max(Double(max(width, 1)) / Double(max(height, 1)), 1.0 / 4), 4)
+    var canvasWidth: Double
+    var canvasHeight: Double
+    if ratio >= 1 {
+      (canvasWidth, canvasHeight) = (shortEdge * ratio, shortEdge)
+    } else {
+      (canvasWidth, canvasHeight) = (shortEdge, shortEdge / ratio)
+    }
+    let area = canvasWidth * canvasHeight
+    if area > maxPixels {
+      let scale = (maxPixels / area).squareRoot()
+      canvasWidth *= scale
+      canvasHeight *= scale
+    }
+    func rounded(_ value: Double) -> Int {
+      max(Int(multiple), Int((value / multiple).rounded(.toNearestOrEven) * multiple))
+    }
+    return (rounded(canvasHeight), rounded(canvasWidth))
   }
 
   private func applyImageCond(
@@ -5053,6 +5090,11 @@ extension LocalImageGenerator {
             if imageHeight == firstPassStartHeight * firstPassScaleFactor
               && imageWidth == firstPassStartWidth * firstPassScaleFactor
             {
+              return $0
+            }
+            // A MiniMax H3 Ref2VA reference clip keeps its own aspect ratio: `encodeImageCond` puts
+            // it on its own canvas, as MiniMax's pipeline does, rather than the output's.
+            if modifier == .ref2va && $0.shape[0] >= 22 {
               return $0
             }
             return Upsample(
