@@ -307,8 +307,9 @@ extension UNetFixedEncoder {
             contextTextLength..<(contextTextLength + visionLength), 0..<textEncoding[0].shape[2]
           ].copied())
       }
+      // A reference clip is its latent frames stacked.
       let referenceLength =
-        referenceImages.reduce(0) { $0 + $1.shape[1] / 2 * ($1.shape[2] / 2) }
+        referenceImages.reduce(0) { $0 + $1.shape[0] * ($1.shape[1] / 2) * ($1.shape[2] / 2) }
         + referenceAudios.reduce(0) { $0 + $1.shape[1] }
       let videoLength = videoLatentFrames * videoHeight / 2 * (startWidth / 2)
       let mediaLength = referenceLength + audioRows + visionLength + videoLength
@@ -318,17 +319,28 @@ extension UNetFixedEncoder {
       let textLengths = isCfgEnabled ? [tokenLengthUncond, tokenLengthCond] : [tokenLengthCond]
       for (batch, length) in textLengths.enumerated() {
         let contextLength = length + visionLength
-        let positions = referenceImages.enumerated().map { index, image in
-          (
-            height: image.shape[1], width: image.shape[2],
-            position: Float(contextLength)
-              + (modifier == .fl2va
-                ? (index == 0 ? 0 : Float(frames - 1) * 5 / 3) : Float(index))
-          )
+        // References take their turn on the clock the generated video and audio share: a picture
+        // one unit, a clip one latent frame after another, spaced as the generated frames are.
+        var positions = [(height: Int, width: Int, position: Float)]()
+        var clock = Double(contextLength)
+        for (index, image) in referenceImages.enumerated() {
+          guard modifier != .fl2va else {
+            positions.append(
+              (
+                height: image.shape[1], width: image.shape[2],
+                position: Float(contextLength) + (index == 0 ? 0 : Float(frames - 1) * 5 / 3)
+              ))
+            continue
+          }
+          for frame in 0..<image.shape[0] {
+            positions.append(
+              (height: image.shape[1], width: image.shape[2], position: Float(clock)))
+            clock += image.shape[0] == 1 ? 1 : 5.0 / 3.0 * (frame % 5 == 0 ? 1 : 4)
+          }
         }
-        // Reference pictures take one position each ahead of the target (Ref2VA and H3 Image).
-        var mediaPosition = Float(
-          contextLength + (modifier == .ref2va || !hasAudio ? referenceImageCount : 0))
+        // Reference pictures take one position each ahead of the target (Ref2VA and H3 Image), a
+        // reference clip one per latent frame on the clock above; FL2VA's keyframes take none.
+        var mediaPosition = Float(clock)
         let audioPositions = referenceAudios.map { audio in
           let position = mediaPosition
           mediaPosition += Float(audio.shape[1] / 2)

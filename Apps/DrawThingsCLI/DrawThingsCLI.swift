@@ -23,6 +23,11 @@ import ScriptDataModels
 import Tokenizer
 import Trainer
 
+#if canImport(C_ccv)
+  import C_ccv
+#elseif canImport(C_swiftpm_ccv)
+  import C_swiftpm_ccv
+#endif
 #if canImport(Darwin)
   import Darwin
 #elseif canImport(Glibc)
@@ -59,6 +64,7 @@ private enum DrawThingsCLIError: LocalizedError {
   case unsupportedVideoOutput(String)
   case invalidInputImagePath(String)
   case invalidInputImage(String)
+  case invalidInputVideo(String)
 
   var errorDescription: String? {
     switch self {
@@ -96,6 +102,8 @@ private enum DrawThingsCLIError: LocalizedError {
       return "Input image path does not exist: \(path)"
     case .invalidInputImage(let path):
       return "Failed to decode input image: \(path)"
+    case .invalidInputVideo(let path):
+      return "Failed to read frames from input video: \(path)"
     }
   }
 }
@@ -378,6 +386,12 @@ private let generateImageHelp = ArgumentHelp(
     "Without --width or --height, the missing size comes from the first image: its resolution, or its aspect ratio when the other side is given, rounded to a multiple of 64. The first image is the canvas and the rest are moodboard images, scaled to cover the output size without cropping. When --width and --height don't match the first image's aspect ratio, it is used only as a moodboard image and there is no canvas; pass --crop to center-crop every image to the output size instead. A canvas image smaller than a requested size is scaled up, with a warning. --avc accepts exactly one image, which is always the canvas and is center-cropped to the output size, with or without --crop."
 )
 
+private let generateVideoHelp = ArgumentHelp(
+  "Reference video path, for MiniMax H3 Ref2VA.",
+  discussion:
+    "Frames are read from its start at the model's frame rate, up to --frames, and center-cropped to the output size. A video shorter than that holds its last frame. Without --width or --height, the missing size comes from the video. The model is given the clip next to the --image pictures: the prompt calls it <Video 1>, and the pictures <Picture 1>, <Picture 2> and so on."
+)
+
 private let videoFormatHelp = ArgumentHelp(
   "Video export format for .mov/.mp4 outputs.",
   discussion:
@@ -565,6 +579,9 @@ struct GenerateImageInputOptions: ParsableArguments {
     name: .customLong("input-image"),
     help: ArgumentHelp("Alias of --image.", visibility: .hidden))
   var inputImage: String?
+
+  @Option(name: .long, help: generateVideoHelp)
+  var video: String?
 
   @Option(
     name: .long,
@@ -1045,7 +1062,7 @@ private enum ConfigurationLoader {
   }
 }
 
-private enum RecommendedSettingsResolver {
+enum RecommendedSettingsResolver {
   static func resolve(
     modelSpecification: ModelZoo.Specification, overrideDictionary: [String: Any]?,
     modelsDirectory: URL, allowNetwork: Bool
@@ -1137,6 +1154,17 @@ private enum RecommendedSettingsResolver {
       builder.guidanceScale = 1
       builder.sampler = .dDIMTrailing
       builder.shift = 3
+    } else if modelSpecification.version == .seedvr2_3b
+      || modelSpecification.version == .seedvr2_7b
+    {
+      // One-step restoration model: upstream samples once from pure noise without guidance, then
+      // takes the low frequencies from the input with a wavelet color fix. DDIM Trailing takes that
+      // single step at t = 1000.
+      builder.steps = 1
+      builder.guidanceScale = 1
+      builder.strength = 1
+      builder.sampler = .dDIMTrailing
+      builder.colorCalibration = .lab
     }
     return builder.build()
   }
@@ -4354,6 +4382,15 @@ extension DrawThingsCLI {
       if imageInput.audio != nil && backend.isRemoteOrCloud {
         throw ValidationError("--audio currently supports only local generation.")
       }
+      if imageInput.video != nil {
+        if imageInput.audio != nil {
+          throw ValidationError("--video cannot be combined with --audio.")
+        }
+        if backend.cloudCompute {
+          throw ValidationError(
+            "--video supports local generation and --remote servers, not Cloud Compute yet.")
+        }
+      }
       if avc.segmentFrames != nil || avc.condFrames != nil || avc.zeroAudioFeatures {
         throw ValidationError(
           "--segment-frames, --cond-frames, and --zero-audio-features require --avc.")
@@ -4396,10 +4433,12 @@ extension DrawThingsCLI {
       }
 
       let imageSizes = try imagePaths.map(inputImageSize(path:))
+      let videoSize = try imageInput.video.map(inputVideoSize(path:))
       let resolvedConfiguration = try createConfiguration(
         context: context, modelSpecification: modelSpecification, steps: sampling.steps,
         cfg: sampling.cfg,
-        width: sampling.width, height: sampling.height, firstImageSize: imageSizes.first,
+        width: sampling.width, height: sampling.height,
+        firstImageSize: videoSize ?? imageSizes.first,
         frames: sampling.frames, seed: sampling.seed, strength: sampling.strength,
         configJSON: configurationOverrides.configJSON,
         configFile: configurationOverrides.configFile,
@@ -4408,12 +4447,30 @@ extension DrawThingsCLI {
       let configuration = resolvedConfiguration.configuration
       let canvasWidth = Int(configuration.startWidth) * 64
       let canvasHeight = Int(configuration.startHeight) * 64
-      let (canvasIndex, moodboardIndices) = canvasAndMoodboardImages(
-        sizes: imageSizes,
-        canvasSize: !imageInput.crop && resolvedConfiguration.isWidthSpecified
-          && resolvedConfiguration.isHeightSpecified
-          ? (width: canvasWidth, height: canvasHeight) : nil)
-      if let canvasIndex {
+      // A reference video is the canvas, which leaves every image for the moodboard.
+      let (canvasIndex, moodboardIndices) =
+        imageInput.video == nil
+        ? canvasAndMoodboardImages(
+          sizes: imageSizes,
+          canvasSize: !imageInput.crop && resolvedConfiguration.isWidthSpecified
+            && resolvedConfiguration.isHeightSpecified
+            ? (width: canvasWidth, height: canvasHeight) : nil)
+        : (canvas: nil, moodboard: Array(imageSizes.indices))
+      let hasCanvas = canvasIndex != nil || imageInput.video != nil
+      if imageInput.video != nil {
+        guard modelSpecification.version == .minimaxH3,
+          ImageGeneratorUtils.modifierForModel(
+            modelSpecification.file, LoRAs: configuration.loras.compactMap { $0.file }) == .ref2va
+        else {
+          throw ValidationError("--video requires a MiniMax H3 Ref2VA checkpoint.")
+        }
+        // The clip is a reference, not a starting point, and the autoencoder takes 17k + 5 frames.
+        guard configuration.strength >= 1, configuration.numFrames >= 22 else {
+          throw ValidationError(
+            "--video is a reference for a clip generated from noise: it needs --strength 1 and --frames of 22 or more."
+          )
+        }
+      } else if let canvasIndex {
         warnIfCanvasImageIsSmaller(
           context: context, path: imagePaths[canvasIndex], size: imageSizes[canvasIndex],
           resolvedConfiguration: resolvedConfiguration)
@@ -4457,7 +4514,9 @@ extension DrawThingsCLI {
         }
         // Mirrors the cloud request: the canvas is the input, moodboard images are shuffle hints.
         let computeUnits = ComputeUnits.from(
-          configuration, hasImage: canvasIndex != nil, shuffleCount: moodboardIndices.count)
+          configuration, hasImage: hasCanvas,
+          imageFrames: imageInput.video == nil ? 1 : Int(configuration.numFrames),
+          shuffleCount: moodboardIndices.count)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(
@@ -4507,16 +4566,23 @@ extension DrawThingsCLI {
         name: modelSpecification.name, version: modelSpecification.version,
         prompt: promptValues.prompt,
         signposts: ImageGeneratorUtils.expectedSignposts(
-          canvasIndex != nil, mask: false, text: promptValues.prompt,
+          hasCanvas, mask: false, text: promptValues.prompt,
           negativeText: resolvedNegativePrompt, configuration: configuration,
           version: modelSpecification.version, memorizedBy: Set(files)))
       defer { context.finishImageGeneration(generationID) }
       try context.checkCancellation()
-      let canvasImage = try canvasIndex.map {
-        try loadInputImageTensor(
-          path: imagePaths[$0], imageWidth: canvasWidth, imageHeight: canvasHeight,
-          preserveAlpha: modelSpecification.version == .qwenImage2_1)
-      }
+      let canvasImage =
+        try imageInput.video.map {
+          try loadInputVideoTensor(
+            path: $0, imageWidth: canvasWidth, imageHeight: canvasHeight,
+            framesPerSecond: ModelZoo.framesPerSecondForModel(modelSpecification.file),
+            numFrames: max(Int(configuration.numFrames), 1))
+        }
+        ?? canvasIndex.map {
+          try loadInputImageTensor(
+            path: imagePaths[$0], imageWidth: canvasWidth, imageHeight: canvasHeight,
+            preserveAlpha: modelSpecification.version == .qwenImage2_1)
+        }
       let moodboardImages = try moodboardIndices.map { index in
         var imageWidth = canvasWidth
         var imageHeight = canvasHeight
@@ -5350,7 +5416,7 @@ private func validateVideoOutputOptions(outputPath: String, videoFormat: VideoEx
   }
 }
 
-private func loadInputImageTensor(
+func loadInputImageTensor(
   path: String, imageWidth: Int, imageHeight: Int, preserveAlpha: Bool = false
 ) throws
   -> Tensor<FloatType>
@@ -5359,12 +5425,83 @@ private func loadInputImageTensor(
   guard FileManager.default.fileExists(atPath: filePath) else {
     throw DrawThingsCLIError.invalidInputImagePath(filePath)
   }
+  let url = URL(fileURLWithPath: filePath)
+  // Load the image at its own size, so the loader, which picks the nearest pixel from a PNG,
+  // doesn't resize it.
   guard
+    let size = inspectTrainingImage(url: url),
     let (tensor, _, _, _) = loadTrainingTensor(
-      url: URL(fileURLWithPath: filePath), imageWidth: imageWidth, imageHeight: imageHeight,
-      preserveAlpha: preserveAlpha)
+      url: url, imageWidth: size.width, imageHeight: size.height, preserveAlpha: preserveAlpha)
   else {
     throw DrawThingsCLIError.invalidInputImage(filePath)
+  }
+  return resizeImage(tensor, width: imageWidth, height: imageHeight)
+}
+
+/// Scales the image to cover `width` x `height` and center-crops it, the way `loadTrainingTensor`
+/// fits an image, with ccv: bicubic (a = -0.75, as OpenCV) when it enlarges, area averaging when
+/// it shrinks. Colors next to an alpha channel are resized premultiplied, so what a transparent
+/// pixel stores doesn't bleed into the edges.
+private func resizeImage(_ image: Tensor<FloatType>, width: Int, height: Int)
+  -> Tensor<FloatType>
+{
+  let sourceHeight = image.shape[1]
+  let sourceWidth = image.shape[2]
+  let channels = image.shape[3]
+  guard sourceWidth != width || sourceHeight != height else { return image }
+  // Four channels are alpha, then the colors, as `loadTrainingTensor` stores them.
+  let hasAlpha = channels == 4
+  let scaledWidth: Int
+  let scaledHeight: Int
+  if sourceWidth * height > sourceHeight * width {
+    scaledHeight = height
+    scaledWidth = Int((Double(sourceWidth) * Double(height) / Double(sourceHeight)).rounded())
+  } else {
+    scaledWidth = width
+    scaledHeight = Int((Double(sourceHeight) * Double(width) / Double(sourceWidth)).rounded())
+  }
+  var source = Tensor<Float>(from: image).reshaped(.HWC(sourceHeight, sourceWidth, channels))
+  if hasAlpha {
+    source = source.copied()
+    source.withUnsafeMutableBytes {
+      guard let f32 = $0.baseAddress?.assumingMemoryBound(to: Float.self) else { return }
+      for i in stride(from: 0, to: sourceHeight * sourceWidth * 4, by: 4) {
+        let alpha = f32[i]
+        for channel in 1..<4 {
+          f32[i + channel] = (f32[i + channel] + 1) * 0.5 * alpha
+        }
+      }
+    }
+  }
+  var output: UnsafeMutablePointer<ccv_dense_matrix_t>? = ccv_dense_matrix_new(
+    Int32(scaledHeight), Int32(scaledWidth), Int32(CCV_32F) | Int32(channels), nil, 0)
+  ccv_resample(
+    UnsafeMutableRawPointer(source.cTensor).assumingMemoryBound(to: ccv_dense_matrix_t.self),
+    &output, 0, Double(scaledHeight) / Double(sourceHeight),
+    Double(scaledWidth) / Double(sourceWidth), Int32(CCV_INTER_AREA | CCV_INTER_CUBIC))
+  guard let output else { return image }
+  defer { ccv_matrix_free(output) }
+  let offsetX = (scaledWidth - width) / 2
+  let offsetY = (scaledHeight - height) / 2
+  let step = Int(output.pointee.step) / MemoryLayout<Float>.size
+  var tensor = Tensor<FloatType>(.CPU, .NHWC(1, height, width, channels))
+  for y in 0..<height {
+    let row = output.pointee.data.f32.advanced(by: (y + offsetY) * step + offsetX * channels)
+    for x in 0..<width {
+      if hasAlpha {
+        let alpha = min(max(row[x * 4], 0), 1)
+        tensor[0, y, x, 0] = FloatType(alpha)
+        for channel in 1..<4 {
+          // A transparent pixel is black, as the loader leaves it when it draws the image.
+          let color = alpha > 0 ? min(max(row[x * 4 + channel] / alpha, 0), 1) : 0
+          tensor[0, y, x, channel] = FloatType(color * 2 - 1)
+        }
+      } else {
+        for channel in 0..<channels {
+          tensor[0, y, x, channel] = FloatType(min(max(row[x * channels + channel], -1), 1))
+        }
+      }
+    }
   }
   return tensor
 }
@@ -5378,6 +5515,89 @@ private func inputImageSize(path: String) throws -> (width: Int, height: Int) {
     throw DrawThingsCLIError.invalidInputImage(filePath)
   }
   return size
+}
+
+/// The size of a video's frames as they display, with the track's rotation applied.
+private func inputVideoSize(path: String) throws -> (width: Int, height: Int) {
+  let filePath = URL(fileURLWithPath: path).standardizedFileURL.path
+  guard FileManager.default.fileExists(atPath: filePath) else {
+    throw DrawThingsCLIError.invalidInputImagePath(filePath)
+  }
+  #if canImport(AVFoundation) && canImport(CoreMedia) && canImport(CoreVideo)
+    let generator = AVAssetImageGenerator(asset: AVURLAsset(url: URL(fileURLWithPath: filePath)))
+    generator.appliesPreferredTrackTransform = true
+    guard let image = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+      throw DrawThingsCLIError.invalidInputVideo(filePath)
+    }
+    return (image.width, image.height)
+  #else
+    throw ValidationError("--video is not supported on this platform.")
+  #endif
+}
+
+/// The frames of a video as one `NHWC(numFrames, imageHeight, imageWidth, 3)` tensor in -1...1.
+/// Frames are taken from the start at `framesPerSecond`, scaled to cover the size and
+/// center-cropped. A video shorter than `numFrames` holds its last frame.
+private func loadInputVideoTensor(
+  path: String, imageWidth: Int, imageHeight: Int, framesPerSecond: Double, numFrames: Int
+) throws -> Tensor<FloatType> {
+  let filePath = URL(fileURLWithPath: path).standardizedFileURL.path
+  guard FileManager.default.fileExists(atPath: filePath) else {
+    throw DrawThingsCLIError.invalidInputImagePath(filePath)
+  }
+  #if canImport(AVFoundation) && canImport(CoreMedia) && canImport(CoreGraphics)
+    let generator = AVAssetImageGenerator(asset: AVURLAsset(url: URL(fileURLWithPath: filePath)))
+    generator.appliesPreferredTrackTransform = true
+    generator.requestedTimeToleranceBefore = .zero
+    generator.requestedTimeToleranceAfter = .zero
+    guard
+      let bitmapContext = CGContext(
+        data: nil, width: imageWidth, height: imageHeight, bitsPerComponent: 8,
+        bytesPerRow: imageWidth * 4, space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
+          | CGImageAlphaInfo.noneSkipLast.rawValue), let data = bitmapContext.data
+    else {
+      throw DrawThingsCLIError.invalidInputVideo(filePath)
+    }
+    bitmapContext.interpolationQuality = .high
+    let rgba = data.assumingMemoryBound(to: UInt8.self)
+    var tensor = Tensor<FloatType>(.CPU, .NHWC(numFrames, imageHeight, imageWidth, 3))
+    for frame in 0..<numFrames {
+      // A time past the end of the video has no image, which leaves the last frame in place.
+      if let image = try? generator.copyCGImage(
+        at: CMTime(seconds: Double(frame) / framesPerSecond, preferredTimescale: 6_000),
+        actualTime: nil)
+      {
+        var scaledWidth = imageWidth
+        var scaledHeight = imageHeight
+        if image.width * imageHeight > image.height * imageWidth {
+          scaledWidth = Int(
+            (Double(image.width) * Double(imageHeight) / Double(image.height)).rounded())
+        } else {
+          scaledHeight = Int(
+            (Double(image.height) * Double(imageWidth) / Double(image.width)).rounded())
+        }
+        bitmapContext.draw(
+          image,
+          in: CGRect(
+            x: (imageWidth - scaledWidth) / 2, y: (imageHeight - scaledHeight) / 2,
+            width: scaledWidth, height: scaledHeight))
+      } else if frame == 0 {
+        throw DrawThingsCLIError.invalidInputVideo(filePath)
+      }
+      for y in 0..<imageHeight {
+        for x in 0..<imageWidth {
+          for channel in 0..<3 {
+            tensor[frame, y, x, channel] = FloatType(
+              Float(rgba[(y * imageWidth + x) * 4 + channel]) / 127.5 - 1)
+          }
+        }
+      }
+    }
+    return tensor
+  #else
+    throw ValidationError("--video is not supported on this platform.")
+  #endif
 }
 
 /// The output size an image gives: its own resolution, or its aspect ratio next to a given width

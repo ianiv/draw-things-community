@@ -12,11 +12,11 @@ let package = Package(
   ],
   dependencies: [
     .package(
-      url: "https://github.com/liuliu/ccv.git", revision: "710baf94e5a9cb289bd992bc428b994433bb4ce3"
+      url: "https://github.com/liuliu/ccv.git", revision: "aa1174828ceb0c0dad481397560ef0f4bf60b4f1"
     ),
     .package(
       url: "https://github.com/liuliu/s4nnc.git",
-      revision: "25e473a212d673ffebe0382da46d38927862eccb"),
+      revision: "857de0f68341587c7000ca734f77899b0c4a6c9e"),
     .package(
       url: "https://github.com/liuliu/dflat.git",
       revision: "73925e51e4f44add842177a229f9990cb13711ff"),
@@ -524,6 +524,7 @@ let package = Package(
         "Tokenizer",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "PNG", package: "swift-png"),
+        .product(name: "ccv", package: "ccv"),
       ],
       path: "Apps/DrawThingsCLI",
       exclude: ["Executable", "IOSSystem", "Tests"],

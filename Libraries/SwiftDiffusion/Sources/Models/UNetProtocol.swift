@@ -827,8 +827,10 @@ extension UNetFromNNC {
       let audioLength = hasAudio ? 2 * Int((Double(frames) / 24 * 40).rounded()) : 0
       // Inputs are [video, audio, text, rotary, ...], without the audio for MiniMax H3 Image.
       let textIndex = hasAudio ? 2 : 1
+      // A reference clip is its latent frames stacked: here only its number of rows matters, so the
+      // frames count toward the height.
       let referenceImageSizes = c[2..<(2 + referenceImageCount)].map {
-        (height: $0.shape[1] * 2, width: $0.shape[2] * 2)
+        (height: $0.shape[0] * $0.shape[1] * 2, width: $0.shape[2] * 2)
       }
       let referenceAudioLengths = c[
         (2 + referenceImageCount)..<(2 + referenceImageCount + referenceAudioCount)
