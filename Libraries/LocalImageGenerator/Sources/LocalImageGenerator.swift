@@ -4146,9 +4146,12 @@ extension LocalImageGenerator {
   /// MiniMax H3's canvas for an aspect ratio, as diffusers' `resolve_canvas_size` makes it with
   /// the released checkpoint's settings: the short edge at 768, the area capped at 768 × 1344, both
   /// sides rounded to the nearest multiple of 32 (Python's `round`, half to even), at least 32. The
-  /// ratio is held to the 1:4 to 4:1 it was trained over, which diffusers refuses outside of.
-  /// Returns (height, width).
-  static func minimaxH3CanvasSize(width: Int, height: Int) -> (height: Int, width: Int) {
+  /// ratio is held to the 1:4 to 4:1 it was trained over, which diffusers refuses outside of. A
+  /// size that is already such a canvas (`isMiniMaxH3CanvasSize`) stays as it is: rounding can put
+  /// a canvas past the area cap, and putting it on a canvas again would shrink it. Returns
+  /// (height, width).
+  public static func minimaxH3CanvasSize(width: Int, height: Int) -> (height: Int, width: Int) {
+    if isMiniMaxH3CanvasSize(width: width, height: height) { return (height, width) }
     let shortEdge = 768.0
     let maxPixels = 768.0 * 1344
     let multiple = 32.0
@@ -4170,6 +4173,18 @@ extension LocalImageGenerator {
       max(Int(multiple), Int((value / multiple).rounded(.toNearestOrEven) * multiple))
     }
     return (rounded(canvasHeight), rounded(canvasWidth))
+  }
+
+  /// Whether `width` x `height` is one of `minimaxH3CanvasSize`'s canvases: both sides multiples of
+  /// 32, the ratio within 1:4 to 4:1, and either the short edge at 768 with the area at most the
+  /// cap, or the area at the cap; both within what rounding each side to 32 can add or take.
+  public static func isMiniMaxH3CanvasSize(width: Int, height: Int) -> Bool {
+    guard width > 0, height > 0, width % 32 == 0, height % 32 == 0, width * 4 >= height, height * 4 >= width
+    else { return false }
+    let maxPixels = 768 * 1344
+    let area = width * height
+    let slack = 16 * (width + height) + 256
+    return (min(width, height) == 768 && area <= maxPixels + slack) || abs(area - maxPixels) <= slack
   }
 
   private func applyImageCond(

@@ -1611,12 +1611,13 @@ extension FirstStage {
           encodingTileSize.width = startWidth
           encodingTileSize.height = startHeight
         }
-        // As for images below: the encoder's first layers hold 17 x (height + 2) x (width + 2) x
-        // 128 values for a 17-frame chunk, which no longer fits the graph's 32-bit sizes above
-        // about 0.98 megapixels (a 1344 x 768 reference clip doesn't). Such clips are encoded in
-        // 768-pixel tiles too, with a 64-pixel overlap, each chunk tiled in space as in time.
+        // As for images below: the encoder's first 128-channel convolutions pad two frames in front
+        // of a 17-frame chunk (`MiniMaxH3VAE`'s causal resnet blocks), so they hold
+        // 19 x (height + 2) x (width + 2) x 128 values, which no longer fits the graph's 32-bit sizes
+        // above about 0.88 megapixels (a 1152 x 768 reference clip doesn't). Such clips are encoded
+        // in 768-pixel tiles too, with a 64-pixel overlap, each chunk tiled in space as in time.
         let fits = { (width: Int, height: Int) in
-          17 * (height * 16 + 2) * (width * 16 + 2) * 128 <= Int(Int32.max)
+          (frames + 2) * (height * 16 + 2) * (width * 16 + 2) * 128 <= Int(Int32.max)
         }
         if !fits(encodingTileSize.width, encodingTileSize.height) {
           encodingTileSize.width = min(encodingTileSize.width, 48)
