@@ -4,10 +4,11 @@ extension Denoiser {
   /// Rectified-flow discretization that samples a fixed raw sigma grid per step count, as
   /// few-step distilled models (HyperFlow H3 Flash, MiniMax H3 Image) require. The grid is shifted
   /// with the usual flow shift `shift * s / (1 + (shift - 1) * s)` (as `LinearDiscretization` does
-  /// for RF), so shift 1 samples it as trained. Step counts without a grid follow the finest grid
-  /// stretched to `steps + 1` points when `stretchesFinestGrid` (MiniMax H3 Image, whose heads and
-  /// distillation follow that curve; a linear schedule came out distorted and over-contrasted),
-  /// else the trailing linear schedule (HyperFlow). Either way the result has `steps + 1` entries.
+  /// for RF), for HyperFlow and MiniMax H3 Image alike, so shift 1 samples it as trained. Step
+  /// counts without a grid follow the finest grid stretched to `steps + 1` points when
+  /// `stretchesFinestGrid` (MiniMax H3 Image, whose heads and distillation follow that curve; a
+  /// linear schedule came out distorted and over-contrasted), else the trailing linear schedule
+  /// (HyperFlow). Either way the result has `steps + 1` entries.
   public struct RFSigmaGridDiscretization: Discretization {
     private let linearDiscretization: LinearDiscretization
     private let grids: [Int: [Double]]

@@ -238,16 +238,18 @@ extension LocalImageGenerator {
     // sigmas, Simple on flow models and Karras on the rest when none is picked.
     scheduler = scheduler.resolved(for: parameterization, sampler: type.comfySampler)
     // MiniMax H3 Image has one output head per interval of its own sigma grid. DDIM Trailing (its
-    // native sampler) runs Euler steps on that grid at step counts that have one (shift is
-    // ignored for MiniMax H3 Image, as ComfyUI's `MiniMaxH3ImageModelSampling` does, so the grid
-    // is always sampled as trained); other step counts sample the finest grid stretched to that
-    // many steps (`RFSigmaGridDiscretization`). Every other sampler goes through the usual
-    // flow-model samplers below, and the head selector blends heads for whatever sigmas they step
-    // through. LCM's own schedule is a 1000-entry index table on a plain flow schedule, nowhere
-    // near that grid, and it came out ghosted; ComfyUI's LCM steps on its scheduler's sigmas,
-    // which with `simple` follow the grid. So LCM steps on the grid DDIM Trailing samples (the
-    // same piecewise-linear curve as ComfyUI's `simple`, without its 1000-entry table's rounding,
-    // up to 1e-3 at 6 steps), with a scheduler of the user's own only when one is picked.
+    // native sampler) runs Euler steps on that grid at step counts that have one; other step
+    // counts sample the finest grid stretched to that many steps (`RFSigmaGridDiscretization`).
+    // Shift applies on top of whichever schedule a sampler takes, as Draw Things shifts H3 Image
+    // like any flow model (ComfyUI's `MiniMaxH3ImageModelSampling` ignores it): shift 1 samples
+    // the grid as trained, higher shifts spend more of the steps at high noise. Every other
+    // sampler goes through the usual flow-model samplers below, and the head selector blends
+    // heads for whatever sigmas they step through. LCM's own schedule is a 1000-entry index table
+    // on a plain flow schedule, nowhere near that grid, and it came out ghosted; ComfyUI's LCM
+    // steps on its scheduler's sigmas, which with `simple` follow the grid. So LCM steps on the
+    // grid DDIM Trailing samples (the same piecewise-linear curve as ComfyUI's `simple`, without
+    // its 1000-entry table's rounding, up to 1e-3 at 6 steps), with a scheduler of the user's own
+    // only when one is picked.
     let h3ImageGrids =
       version == .minimaxH3Image && (type == .dDIMTrailing || type == .LCM)
         && scheduler == .samplerDefault
@@ -256,7 +258,8 @@ extension LocalImageGenerator {
     // H3 Image ever takes as input (the last nonzero point of its grid, about 0.23): at 8 steps
     // five of them sit under 0.04, and the image came out as a web of noise, while DPM++ 2M on the
     // trailing schedule is clean. So its Karras schedule ends at that point, as Karras schedules
-    // of discrete models end at their lowest trained sigma (`KarrasDiscretization.init`).
+    // of discrete models end at their lowest trained sigma (`KarrasDiscretization.init`); the
+    // shift then moves the whole schedule, that point included, as it does any flow model's.
     var karrasParameterization = parameterization
     if version == .minimaxH3Image, case .rf(var rf) = parameterization,
       let floor = h3Layout.sigmaGrid.dropLast().last, floor > rf.sigmaMin
@@ -1583,11 +1586,6 @@ extension LocalImageGenerator {
         ? min(configuration.diffusionTileHeight, configuration.startHeight)
         : configuration.startHeight
       shift = ModelZoo.shiftFor((width: tiledWidth, height: tiledHeight), version: modelVersion)
-    } else if modelVersion == .minimaxH3Image {
-      // MiniMax H3 Image samples its trained sigma grid whatever the shift, as ComfyUI's
-      // `MiniMaxH3ImageModelSampling` does ("the flow shift is unused"): a shifted schedule
-      // steps through sigmas its output heads were never distilled for.
-      shift = 1
     } else {
       shift = Double(configuration.shift)
     }

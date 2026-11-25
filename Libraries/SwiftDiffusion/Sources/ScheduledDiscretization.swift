@@ -39,11 +39,15 @@ extension Denoiser {
   /// (1000-entry table, `time_snr_shift` by `shift`), `ModelSamplingDiscrete` for DDPM (the
   /// training sigmas, log-interpolated), `ModelSamplingContinuousEDM` for EDM, and
   /// `MiniMaxH3ImageModelSampling` (comfy/ldm/minimax/sampling.py) when a sigma grid is given:
-  /// sigma(t) runs piecewise-linearly along the grid and the shift is unused, so the schedulers at
-  /// the grid's step count land on (or, where ComfyUI's integer table rounds, within 1e-3 of) the
-  /// grid the output heads were distilled for; unlike ComfyUI, no step goes below the grid's last
-  /// nonzero sigma (`floored(_:at:)`). Discrete and EDM models apply Draw Things' shift
-  /// (sigma × shift, as `LinearDiscretization` does) to the result; ComfyUI has none for them.
+  /// sigma(t) runs piecewise-linearly along the grid, so at shift 1 the schedulers at the grid's
+  /// step count land on (or, where ComfyUI's integer table rounds, within 1e-3 of) the grid the
+  /// output heads were distilled for; unlike ComfyUI, no step goes below the grid's last nonzero
+  /// sigma (`floored(_:at:)`). ComfyUI's H3 Image sampling ignores the shift; Draw Things shifts
+  /// every H3 Image schedule with the flow shift (`LinearDiscretization` and the other RF
+  /// discretizations), so here the grid schedule takes `shift * s / (1 + (shift - 1) * s)` as a
+  /// last step, after the floor, and differs from ComfyUI at any shift but 1. Discrete and EDM
+  /// models apply Draw Things' shift (sigma × shift, as `LinearDiscretization` does) to the
+  /// result; ComfyUI has none for them.
   public struct ScheduledDiscretization: Discretization {
     private let linearDiscretization: LinearDiscretization
     private let parameterization: Parameterization
@@ -74,8 +78,7 @@ extension Denoiser {
       linearDiscretization.timestep(for: alphaCumprod)
     }
     public func alphaCumprod(timestep: Float, shift: Double) -> Double {
-      linearDiscretization.alphaCumprod(
-        timestep: timestep, shift: ascendingGrid.isEmpty ? shift : 1)
+      linearDiscretization.alphaCumprod(timestep: timestep, shift: shift)
     }
     public func alphaCumprod(from sigma: Double) -> Double {
       linearDiscretization.alphaCumprod(from: sigma)
@@ -133,6 +136,9 @@ extension Denoiser {
       if sampling.appliesShiftToSigmas && shift != 1 {
         sigmas = sigmas.map { $0 * shift }
       }
+      if let gridShift = sampling.gridShift, gridShift != 1 {
+        sigmas = sigmas.map { ModelSampling.timeSNRShift($0, shift: gridShift) }
+      }
       return sigmas
     }
 
@@ -143,8 +149,10 @@ extension Denoiser {
       guard case .rf(_) = parameterization else { return nil }
       guard percent > 0 else { return 1 }
       guard percent < 1 else { return 0 }
-      return ModelSampling(parameterization, shift: shift, ascendingGrid: ascendingGrid).sigma(
-        timestep: 1 - percent)
+      let sampling = ModelSampling(parameterization, shift: shift, ascendingGrid: ascendingGrid)
+      let sigma = sampling.sigma(timestep: 1 - percent)
+      guard let gridShift = sampling.gridShift, gridShift != 1 else { return sigma }
+      return ModelSampling.timeSNRShift(sigma, shift: gridShift)
     }
 
     /// The nonzero sigmas moved so the lowest is at least `floor`: when it falls below, they're
@@ -323,7 +331,8 @@ extension Denoiser.ScheduledDiscretization {
   struct ModelSampling {
     enum Kind {
       case flow(shift: Double)
-      case grid([Double])
+      /// The ascending grid, and the flow shift applied after the floor (`gridShift`).
+      case grid([Double], shift: Double)
       case discrete(logSigmas: [Double])
       case edm(sigmaMin: Double, sigmaMax: Double)
     }
@@ -333,7 +342,8 @@ extension Denoiser.ScheduledDiscretization {
     init(_ parameterization: Denoiser.Parameterization, shift: Double, ascendingGrid: [Double]) {
       switch parameterization {
       case .rf(_):
-        let kind: Kind = ascendingGrid.isEmpty ? .flow(shift: shift) : .grid(ascendingGrid)
+        let kind: Kind =
+          ascendingGrid.isEmpty ? .flow(shift: shift) : .grid(ascendingGrid, shift: shift)
         self.kind = kind
         // `ModelSamplingDiscreteFlow.set_parameters`: sigma at t = 1/1000 … 1.
         table = (1...1000).map { Self.sigma(kind, timestep: Double($0) / 1000) }
@@ -348,7 +358,7 @@ extension Denoiser.ScheduledDiscretization {
     }
 
     /// Discrete and EDM sigmas take Draw Things' shift afterwards; flow models have it inside
-    /// sigma(t), and MiniMax H3 Image ignores it, as ComfyUI does.
+    /// sigma(t), and MiniMax H3 Image takes it afterwards too (`gridShift`).
     var appliesShiftToSigmas: Bool {
       switch kind {
       case .discrete, .edm: return true
@@ -366,12 +376,29 @@ extension Denoiser.ScheduledDiscretization {
       }
     }
 
+    /// The shift MiniMax H3 Image's schedule takes once the grid has given its sigmas and they're
+    /// floored, as `timeSNRShift`: ComfyUI's `MiniMaxH3ImageModelSampling` has no shift, but Draw
+    /// Things shifts H3 Image's schedule like any flow model's (`LinearDiscretization`), and
+    /// shifting after the floor keeps the floor where the shift puts the grid's last point, as the
+    /// RF `KarrasDiscretization` shifts its floored schedule. Nil for other models.
+    var gridShift: Double? {
+      if case .grid(_, let shift) = kind {
+        return shift
+      }
+      return nil
+    }
+
+    /// comfy/model_sampling.py `time_snr_shift` for flow models (Draw Things' RF shift).
+    static func timeSNRShift(_ sigma: Double, shift: Double) -> Double {
+      shift == 1 ? sigma : shift * sigma / (1 + (shift - 1) * sigma)
+    }
+
     /// MiniMax H3 Image's last nonzero grid point (about 0.23): it never takes input below it, and
     /// steps spent under it came out as noise, so every scheduler's lowest nonzero sigma stays at
     /// or above it, as `LocalImageGenerator.sampler(from:)` floors its Karras schedule. ComfyUI
     /// goes down to the table's first entry. Nil for other models.
     var sigmaFloor: Double? {
-      if case .grid(let grid) = kind, grid.count >= 2 {
+      if case .grid(let grid, _) = kind, grid.count >= 2 {
         return grid[1]
       }
       return nil
@@ -399,10 +426,9 @@ extension Denoiser.ScheduledDiscretization {
     private static func sigma(_ kind: Kind, timestep: Double) -> Double {
       switch kind {
       case .flow(let shift):
-        // `time_snr_shift`
-        return shift == 1 ? timestep : shift * timestep / (1 + (shift - 1) * timestep)
-      case .grid(let grid):
-        // `MiniMaxH3ImageModelSampling.sigma`
+        return timeSNRShift(timestep, shift: shift)
+      case .grid(let grid, _):
+        // `MiniMaxH3ImageModelSampling.sigma` (unshifted; `gridShift` comes after the floor)
         let n = grid.count - 1
         let position = min(max(timestep, 0), 1) * Double(n)
         let index = min(Int(position.rounded(.down)), n - 1)
